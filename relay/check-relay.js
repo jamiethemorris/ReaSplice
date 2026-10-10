@@ -33,7 +33,7 @@ const context = {
   process: { env: {} }, setInterval() { return 1; }, clearInterval() {}
 };
 vm.createContext(context);
-vm.runInContext(bootstrap + '\nglobalThis.__test = {control, status, authenticate, handlers, windows};', context);
+vm.runInContext(bootstrap + '\nglobalThis.__test = {control, status, authenticate, handlers, windows, refreshBridge};', context);
 const test = context.__test;
 const hooks = context.__spliceDock;
 const normalize = value => JSON.parse(JSON.stringify(value));
@@ -65,6 +65,23 @@ async function check() {
     setContentSize(w, h) { size = [w, h]; }, setMinimumSize() {}, setMaximumSize() {}, hide() {}, setBounds() {}, show() {} });
   hooks.windowCreated('companion', win);
   test.windows.get('companion').loaded = true;
+  let bridgeReply = '';
+  wc.executeJavaScript = async code => {
+    if (code.includes('getRequest')) return { id: 'test-bridge-1' };
+    bridgeReply = code;
+    return true;
+  };
+  await test.refreshBridge(test.windows.get('companion'));
+  assert.equal(test.status().bridgeRequest.id, 'test-bridge-1');
+  await test.control({ type: 'bridge-result', id: 'stale', ok: true });
+  assert.equal(bridgeReply, '');
+  await assert.rejects(test.control({ type: 'bridge-result', id: 'test-bridge-1', ok: 'true' }), /Invalid Bridge result/);
+  await test.control({ type: 'bridge-result', id: 'test-bridge-1', ok: true });
+  assert.equal(bridgeReply, 'globalThis.__reaSpliceBridge?.complete("test-bridge-1", true)');
+  assert.equal(test.status().bridgeRequest, null);
+  wc.executeJavaScript = async () => ({ id: 'invalid;code()' });
+  await test.refreshBridge(test.windows.get('companion'));
+  assert.equal(test.status().bridgeRequest, null);
   await test.control({ type: 'input', event: { type: 'mouseDown', x: 45, y: 72, button: 'left' } });
   await test.control({ type: 'input', event: { type: 'mouseMove', x: 49, y: 73 } });
   await test.control({ type: 'input', event: { type: 'mouseUp', x: 49, y: 73, button: 'left' } });
@@ -94,7 +111,7 @@ async function check() {
   await assert.rejects(test.control({ type: 'input', event: { type: '__proto__' } }), /Unsupported input/);
   assert.equal(typeof handler, 'function');
   app.emit('before-quit');
-  console.log('Relay contract checks passed: local authorization, bounded controls, geometry filtering, drag buttons, wheel/key dispatch.');
+  console.log('Relay contract checks passed: local authorization, bounded controls, Bridge handoff, geometry filtering, drag buttons, wheel/key dispatch.');
 }
 
 check().catch(error => { console.error(error); process.exitCode = 1; });

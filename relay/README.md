@@ -6,7 +6,9 @@ catalog or copy credentials. The original app and the dock runtime must not run
 at the same time. Splice enforces its normal single-instance lock.
 
 Run `python3 relay/prepare-splice.py` to create `build/ReaSplice.app`. Preparation
-validates six main-process anchors and two sample-presenter anchors per renderer before writing the generated bundle.
+validates eight main-process anchors, two sample-presenter anchors per renderer,
+and each renderer's Bridge button and three installed-state tooltips before
+writing the generated bundle.
 It also appends `renderer.css` to each private renderer stylesheet to hide
 scrollbar chrome without changing scrolling behavior.
 `relay/launch-splice.sh` refuses to launch while normal Splice is running.
@@ -47,6 +49,10 @@ surface selection. Ordinary native window show/focus events do not change it.
   uses Electron keyboard conventions. Modifiers: `shift`, `alt`, `control`, `meta`.
 - `{type:"text",text}` inserts composed/pasted text into the real focused input.
 - `{type:"surface",surface:"companion"|"main"}` selects the genuine app surface.
+- `{type:"bridge-result",id,ok}` completes a pending Bridge button request. The
+  native viewer handles `/status.bridgeRequest` with the fixed `bridge.ensure`
+  host action. Success asks Splice's original playback service to connect. Stale
+  IDs are ignored; this command cannot choose a plugin, track, or execute code.
 - `{type:"drag-ack",id}` acknowledges `status.drag`. Start a native host drag with
   the supplied absolute `files`. Splice has already downloaded/prepared them.
 - `{type:"restore"}` restores original bounds and leaves offscreen windows hidden.
@@ -66,6 +72,17 @@ installation before loading the native updater, and prevents itself from becomin
 the default splice:// handler. While docked it filters the normal window-state
 geometry/isOpen writes, retaining pre-existing window dimensions. Normal account,
 library, downloads, playback and user-selected preferences remain Splice's own.
+
+Splice 5.4.13 constructs `VstInstallManager` without initializing its plugin
+scanner or renderer IPC streams. Preparation adds that startup call and makes
+initialization idempotent, with IPC registered before the asynchronous scan.
+Installation and compatibility states still come from Splice's own scanner and
+version checks. `bridge-renderer.js` redirects the genuine Bridge button into a
+bounded request/response handoff. The v0.5 native host loads or reuses Bridge on
+the master track's record-FX chain (REAPER's monitoring FX), puts it last, brings
+it online and enables it, then opens that chain. Only after host success does the
+renderer request the normal Splice connection. Installation alone does not
+establish a connection.
 
 Limitations requiring runtime validation: installed Electron/code-signing policy;
 OSR capture and CDP input; native dialogs and external authentication still use

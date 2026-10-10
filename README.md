@@ -18,6 +18,8 @@ code, not a copy of Splice or any sounds.
   audio file into REAPER.
 - **Project-aware BPM searches.** Choose any BPM, the current project BPM, or an
   adjustable range around it in both Library and Browse sample searches.
+- **Bridge in monitoring FX.** The Bridge button adds or opens Splice Bridge at
+  the end of REAPER's monitoring chain, reusing an existing instance.
 
 ## Requirements
 
@@ -100,6 +102,25 @@ values inside the requested interval, clamped to those limits. Pack discovery
 cards, presets and mixed overview pages are not sample lists; the preference
 takes effect when opening their Samples results.
 
+### Splice Bridge
+
+Bridge is optional and separate from the BPM search preference. Install Splice
+Bridge, make sure REAPER has scanned it, then click **Bridge** in either Compact or
+Full app. ReaSplice adds it as the last monitoring FX, enables it, opens the chain,
+and asks Splice to connect. Subsequent clicks reuse the existing monitoring
+instance; if necessary, it is moved to the end. Other effects keep their relative
+order and settings. An existing Bridge inside a monitoring FX container is also
+reused and moved to the end of the top-level chain.
+
+The button opens the monitoring instance instead of toggling Splice's connection.
+Monitoring FX are shared across projects; remove or bypass Bridge in that chain
+when you no longer want it running. The action does not add a project track or
+insert anything into the master track's normal FX chain.
+
+ReaSplice initializes Splice 5.4.13's installation detector so an installed Bridge
+plugin is recognized. If you install Bridge while ReaSplice is running and the
+button still says **Install Bridge**, stop and relaunch the private runtime.
+
 ## Updates and troubleshooting
 
 - **After updating Splice:** stop ReaSplice with the power icon, quit normal Splice,
@@ -117,10 +138,13 @@ takes effect when opening their Samples results.
   succeeded. You can also launch with `zsh relay/launch-splice.sh` from the checkout.
 - **Drag ends too early:** keep holding the sample until macOS begins the native
   file drag, then release it over the arrangement.
+- **Bridge cannot be loaded:** check that Splice Bridge appears in REAPER's FX
+  browser. If it was just installed, rescan plug-ins. Rebuild the native host and
+  rerun **ReaSplice.lua** when upgrading to the monitoring FX integration.
 
 The older `Splice Dock.lua` and `Reload Splice Dock.lua` files are compatibility
 aliases. The keyboard shim and its build script are retained for the original
-prototype; the current v0.4 host includes keyboard routing and does not need them.
+prototype; the current v0.5 host includes keyboard routing and does not need them.
 
 ## How it works
 
@@ -142,6 +166,9 @@ details. The active code lives in `native/`, `ui/`, `relay/`, and `scripts/`.
 Live checks on the tested setup cover library/catalog browsing and searching,
 dock resizing, native dragging of owned samples, hidden-scrollbar wheel scrolling,
 and BPM filtering in Library and Browse. Mode/range preferences survive reloads.
+Bridge 5.1.1 installation detection, adding it to monitoring FX, the Connected
+state, and reusing the same instance on a second click are verified. Audio output
+and synchronization have not yet been verified by listening.
 
 Audio output, new-credit purchases, all desktop-only workflows, Intel builds and
 extremely narrow layouts have not been comprehensively verified. The integration
@@ -155,7 +182,10 @@ node --check relay/bootstrap.js
 node --check relay/tempo-renderer.js
 node relay/check-relay.js
 node relay/check-tempo.js
+node relay/check-bridge.js
 python3 -m py_compile relay/prepare-splice.py
+xcrun clang++ -std=c++17 native/check-monitoring.cpp -o /tmp/reasplice-check-monitoring
+/tmp/reasplice-check-monitoring
 ```
 
 These checks use mocks and do not access your Splice account or spend credits.

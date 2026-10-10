@@ -57,9 +57,22 @@ def prepare(refresh=False):
         '      triggerRestartForUpdate(automatic = false) {\n        if (globalThis.__spliceDock.updatesDisabled) return;\n        const appState = this.appStateManager.appState;',
         'Update install entrypoint')
 
+    # Splice 5.4.13 constructs this service through its injector without calling
+    # init(), so its installation streams stay empty even when Bridge is present.
+    # Use the original scanner and IPC streams; never synthesize install state.
+    index = replace_once(index,
+        '    this.details$ = new import_rxjs29.BehaviorSubject(BRIDGE_PLUGIN);\n  }\n  static {\n    __name(this, "VstInstallManager");',
+        '    this.details$ = new import_rxjs29.BehaviorSubject(BRIDGE_PLUGIN);\n    this.init().catch((error) => log.error("ReaSplice Bridge detection failed", error));\n  }\n  static {\n    __name(this, "VstInstallManager");',
+        'Bridge installation detector startup')
+    index = replace_once(index,
+        '  async init() {\n    this.finder = new PluginFinder();\n    this.refreshInstalled();\n    this.setupIpc();\n  }',
+        '  async init() {\n    if (this.finder) return;\n    this.finder = new PluginFinder();\n    this.setupIpc();\n    await this.refreshInstalled();\n  }',
+        'Bridge installation detector initialization')
+
     # Keep the native filter chips and the actual search request in agreement:
     # the private renderer uses Splice's own sample-search presenter/router.
     tempo_source = (ROOT / 'relay/tempo-renderer.js').read_text()
+    bridge_source = (ROOT / 'relay/bridge-renderer.js').read_text()
     renderer_css = (ROOT / 'relay/renderer.css').read_text()
     renderers = []
     stylesheets = []
@@ -77,7 +90,13 @@ def prepare(refresh=False):
             'ngOnDestroy(){this.globalSearch.unregister(this)}',
             'ngOnDestroy(){globalThis.__reaSpliceTempo?.unregister(this),this.globalSearch.unregister(this)}',
             surface + ' sample search cleanup')
-        renderers.append((bundle.relative_to(source_app), tempo_source + '\n' + renderer))
+        renderer = replace_once(renderer, 'onBridgeClick(){',
+            'onBridgeClick(){return globalThis.__reaSpliceBridge.request(this)}__reaSpliceOriginalBridgeClick(){',
+            surface + ' Bridge button')
+        for tooltip in ('Activate Bridge', 'Deactivate Bridge', 'Add Bridge to a track in your DAW'):
+            renderer = replace_once(renderer, json.dumps(tooltip),
+                '"Open Bridge in REAPER monitoring FX"', surface + ' Bridge tooltip: ' + tooltip)
+        renderers.append((bundle.relative_to(source_app), tempo_source + '\n' + bridge_source + '\n' + renderer))
         styles = list((source_app / surface).glob('styles.*.css'))
         if len(styles) != 1:
             raise RuntimeError(f'Splice layout changed: expected one {surface} stylesheet')

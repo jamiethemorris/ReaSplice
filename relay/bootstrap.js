@@ -29,6 +29,7 @@ let desired = { width: 400, height: 800 };
 let lastError = null;
 let tempoPolicy = null;
 let tempoRevision = 0;
+let bridgeRequest = null;
 const inputTypes = ['mouseDown', 'mouseUp', 'mouseMove', 'mouseEnter', 'mouseLeave', 'mouseWheel', 'keyDown', 'keyUp', 'char', 'text'];
 const diagnostics = {
   inputReceived: Object.fromEntries(inputTypes.map(type => [type, 0])),
@@ -105,7 +106,7 @@ function registerWindow(name, window) {
     originalMax: name === 'main' ? [0, 0] : [480, 1400],
     frame: null, frameWidth: 0, frameHeight: 0, frameSeq: 0,
     loaded: false, buttons: 0, debuggerReady: null,
-    tempo: null, tempoRevision: -1, tempoBusy: false
+    tempo: null, tempoRevision: -1, tempoBusy: false, bridgeBusy: false
   };
   windows.set(name, record);
   wc.setBackgroundThrottling(false);
@@ -167,6 +168,30 @@ async function refreshTempo(record) {
     if (record.tempo?.supported !== false) record.tempoRevision = revision;
   } catch (error) { record.tempo = { supported: false, error: String(error.message || error).slice(0, 240) }; }
   finally { record.tempoBusy = false; }
+}
+
+async function refreshBridge(record) {
+  if (!alive(record) || !record.loaded || record.bridgeBusy) return;
+  record.bridgeBusy = true;
+  try {
+    const request = await record.window.webContents.executeJavaScript(
+      'globalThis.__reaSpliceBridge?.getRequest() || null', false);
+    if (request && typeof request.id === 'string' && /^[a-z0-9-]{1,100}$/i.test(request.id)) {
+      if (!bridgeRequest) bridgeRequest = { id: request.id, surface: record.name };
+    } else if (bridgeRequest?.surface === record.name) bridgeRequest = null;
+  } catch (error) { rememberError(error); }
+  finally { record.bridgeBusy = false; }
+}
+
+async function finishBridge(command) {
+  if (typeof command.id !== 'string' || typeof command.ok !== 'boolean') throw new Error('Invalid Bridge result');
+  if (!bridgeRequest || bridgeRequest.id !== command.id) return;
+  const request = bridgeRequest;
+  const record = windows.get(request.surface);
+  if (!alive(record)) { bridgeRequest = null; return; }
+  await record.window.webContents.executeJavaScript(
+    `globalThis.__reaSpliceBridge?.complete(${JSON.stringify(request.id)}, ${command.ok})`, false);
+  if (bridgeRequest?.id === request.id) bridgeRequest = null;
 }
 
 function validateTempo(command) {
@@ -314,7 +339,7 @@ function status(includeDiagnostics = false) {
     seq: record?.frameSeq || 0, frameWidth: record?.frameWidth || 0, frameHeight: record?.frameHeight || 0,
     drag, error: lastError, docked, surfaces: Array.from(windows.keys()), version: 1,
     applicationName: 'ReaSplice', macDockVisible: process.platform === 'darwin' ? app.dock?.isVisible() ?? null : null,
-    tempo: record?.tempo || null };
+    tempo: record?.tempo || null, bridgeRequest };
   if (includeDiagnostics) result.diagnostics = diagnostics;
   return result;
 }
@@ -375,6 +400,7 @@ async function control(command) {
       break;
     }
     case 'surface': docked = true; await selectSurface(command.surface); break;
+    case 'bridge-result': await finishBridge(command); break;
     case 'drag-ack': if (drag?.id === command.id) { diagnostics.dragAcknowledged++; drag = null; } break;
     case 'restore': restore(); break;
     case 'shutdown':
@@ -438,7 +464,10 @@ const captureTimer = setInterval(() => {
 }, 50);
 const tempoTimer = setInterval(() => {
   if (docked && Date.now() - lastConsumer < 2000) {
-    for (const record of windows.values()) refreshTempo(record).catch(rememberError);
+    for (const record of windows.values()) {
+      refreshTempo(record).catch(rememberError);
+      refreshBridge(record).catch(rememberError);
+    }
   }
 }, 500);
 

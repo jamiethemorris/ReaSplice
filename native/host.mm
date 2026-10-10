@@ -7,6 +7,7 @@
 #include <cstring>
 #include <cmath>
 #include "host_api.h"
+#include "monitoring-bridge.h"
 
 // Minimal ABI declarations corresponding to Cockos' public REAPER/SWELL SDK.
 // Sources: https://github.com/justinfrankel/reaper-sdk/blob/main/sdk/reaper_plugin.h
@@ -65,6 +66,7 @@ static const char *(*GetExtState)(const char *, const char *);
 static void (*SetExtState)(const char *, const char *, const char *, bool);
 static void *(*EnumProjects)(int, char *, int);
 static double (*Master_GetTempo)();
+static reasplice::MonitoringAPI gMonitoringAPI{};
 static NSMutableDictionary<NSValue *, NSString *> *gProjectIDs;
 static HWND (*SwellCreateDialog)(void *, const char *, HWND, WindowProc, LPARAM);
 static void (*SwellDestroyWindow)(HWND);
@@ -105,11 +107,11 @@ static NSDictionary *relayConfiguration() {
   return [result isKindOfClass:[NSDictionary class]] ? result : @{};
 }
 
-@interface ReaSpliceControllerV04 : NSObject <WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate, NSDraggingSource>
+@interface ReaSpliceControllerV05 : NSObject <WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate, NSDraggingSource>
 @end
-static ReaSpliceControllerV04 *gController;
+static ReaSpliceControllerV05 *gController;
 
-@implementation ReaSpliceControllerV04
+@implementation ReaSpliceControllerV05
 - (void)userContentController:(WKUserContentController *)controller didReceiveScriptMessage:(WKScriptMessage *)message {
   if (!message.frameInfo.isMainFrame || !allowedURL(message.frameInfo.request.URL)) return;
   if (![message.body isKindOfClass:[NSDictionary class]]) return;
@@ -120,16 +122,16 @@ static ReaSpliceControllerV04 *gController;
   NSString *request = jsonString(body);
   if (!request || request.length > 1024 * 1024) return;
   if ([body[@"type"] isEqualToString:@"host.info"]) {
-    NSString *result = jsonString(@{@"name": @"ReaSplice", @"version": @"0.4.0",
+    NSString *result = jsonString(@{@"name": @"ReaSplice", @"version": @"0.5.0",
                                     @"docker": @1, @"keyboardRouting": @YES, @"projectTempo": @YES,
-                                    @"tempoPreferences": @YES, @"uiFile": gAllowedFile ?: @""});
-    ReaSpliceV04_Reply([body[@"id"] UTF8String], result.UTF8String, nullptr);
-  } else if ([@[@"drag", @"insert", @"launch", @"relay.config", @"project.tempo", @"tempo.preferences"] containsObject:body[@"type"]]) {
+                                    @"tempoPreferences": @YES, @"monitoringBridge": @YES, @"uiFile": gAllowedFile ?: @""});
+    ReaSpliceV05_Reply([body[@"id"] UTF8String], result.UTF8String, nullptr);
+  } else if ([@[@"drag", @"insert", @"launch", @"relay.config", @"project.tempo", @"tempo.preferences", @"bridge.ensure"] containsObject:body[@"type"]]) {
     handleBuiltinMessage(body);
   } else if (gMessageCallback) {
     gMessageCallback(request.UTF8String);
   } else {
-    ReaSpliceV04_Reply([body[@"id"] UTF8String], nullptr, "The sample-library bridge is not loaded.");
+    ReaSpliceV05_Reply([body[@"id"] UTF8String], nullptr, "The sample-library bridge is not loaded.");
   }
 }
 - (void)webView:(WKWebView *)webView decidePolicyForNavigationAction:(WKNavigationAction *)action decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
@@ -246,26 +248,33 @@ static NSDictionary *projectTempo(NSString **error) {
 static void handleBuiltinMessage(NSDictionary *body) {
   NSString *identifier = body[@"id"], *type = body[@"type"];
   NSDictionary *payload = body[@"payload"];
+  if ([type isEqualToString:@"bridge.ensure"]) {
+    auto result = reasplice::ensureMonitoringBridge(gMonitoringAPI);
+    NSString *json = jsonString(@{@"created":@(result.created), @"moved":@(result.moved), @"index":@(result.index)});
+    ReaSpliceV05_Reply(identifier.UTF8String, result.error.empty() ? json.UTF8String : nullptr,
+        result.error.empty() ? nullptr : result.error.c_str());
+    return;
+  }
   if ([type isEqualToString:@"project.tempo"] || [type isEqualToString:@"tempo.preferences"]) {
     NSString *error = nil;
     NSDictionary *result = [type isEqualToString:@"project.tempo"] ? projectTempo(&error) : tempoPreferences(payload, &error);
-    ReaSpliceV04_Reply(identifier.UTF8String, result ? jsonString(result).UTF8String : nullptr, error ? error.UTF8String : nullptr);
+    ReaSpliceV05_Reply(identifier.UTF8String, result ? jsonString(result).UTF8String : nullptr, error ? error.UTF8String : nullptr);
     return;
   }
   if ([type isEqualToString:@"relay.config"]) {
-    ReaSpliceV04_Reply(identifier.UTF8String, jsonString(relayConfiguration()).UTF8String, nullptr);
+    ReaSpliceV05_Reply(identifier.UTF8String, jsonString(relayConfiguration()).UTF8String, nullptr);
     return;
   }
   if ([type isEqualToString:@"launch"]) {
     NSString *appPath = [[projectRoot() stringByAppendingPathComponent:@"build/ReaSplice.app"] stringByResolvingSymlinksInPath];
     if (![[NSFileManager defaultManager] fileExistsAtPath:appPath]) {
-      ReaSpliceV04_Reply(identifier.UTF8String, nullptr, "The private ReaSplice app has not been built yet.");
+      ReaSpliceV05_Reply(identifier.UTF8String, nullptr, "The private ReaSplice app has not been built yet.");
       return;
     }
     NSBundle *bundle = [NSBundle bundleWithPath:appPath];
     NSString *bundleIdentifier = bundle.bundleIdentifier;
     if (!bundleIdentifier.length) {
-      ReaSpliceV04_Reply(identifier.UTF8String, nullptr, "The private ReaSplice app is incomplete. Rebuild it before launching.");
+      ReaSpliceV05_Reply(identifier.UTF8String, nullptr, "The private ReaSplice app is incomplete. Rebuild it before launching.");
       return;
     }
     bool privateCopyRunning = false;
@@ -273,14 +282,14 @@ static void handleBuiltinMessage(NSDictionary *body) {
       if (running.terminated) continue;
       NSString *runningPath = [running.bundleURL.path stringByResolvingSymlinksInPath];
       if (![runningPath isEqualToString:appPath]) {
-        ReaSpliceV04_Reply(identifier.UTF8String, nullptr,
+        ReaSpliceV05_Reply(identifier.UTF8String, nullptr,
           "Quit the regular Splice app and click Launch Splice again so the dock can start its private copy.");
         return;
       }
       privateCopyRunning = true;
     }
     if (privateCopyRunning) {
-      ReaSpliceV04_Reply(identifier.UTF8String, "{\"launched\":true,\"alreadyRunning\":true}", nullptr);
+      ReaSpliceV05_Reply(identifier.UTF8String, "{\"launched\":true,\"alreadyRunning\":true}", nullptr);
       return;
     }
     NSWorkspaceOpenConfiguration *configuration = [NSWorkspaceOpenConfiguration configuration];
@@ -288,27 +297,27 @@ static void handleBuiltinMessage(NSDictionary *body) {
     configuration.createsNewApplicationInstance = YES;
     [[NSWorkspace sharedWorkspace] openApplicationAtURL:[NSURL fileURLWithPath:appPath]
       configuration:configuration completionHandler:^(NSRunningApplication *app, NSError *error) {
-        ReaSpliceV04_Reply(identifier.UTF8String, "{\"launched\":true}", error ? error.localizedDescription.UTF8String : nullptr);
+        ReaSpliceV05_Reply(identifier.UTF8String, "{\"launched\":true}", error ? error.localizedDescription.UTF8String : nullptr);
       }];
     return;
   }
   NSString *error;
   NSArray<NSURL *> *files = validatedFiles(payload[@"files"], &error);
-  if (!files) { ReaSpliceV04_Reply(identifier.UTF8String, nullptr, error.UTF8String); return; }
+  if (!files) { ReaSpliceV05_Reply(identifier.UTF8String, nullptr, error.UTF8String); return; }
   if ([type isEqualToString:@"insert"]) {
-    if (!InsertMedia) { ReaSpliceV04_Reply(identifier.UTF8String, nullptr, "REAPER's insert API is unavailable."); return; }
+    if (!InsertMedia) { ReaSpliceV05_Reply(identifier.UTF8String, nullptr, "REAPER's insert API is unavailable."); return; }
     if (Undo_BeginBlock) Undo_BeginBlock();
     NSMutableArray *results = [NSMutableArray array];
     int mode = [payload[@"newTrack"] boolValue] ? 1 : 0;
     for (NSURL *file in files) [results addObject:@(InsertMedia(file.path.UTF8String, mode))];
     if (Undo_EndBlock) Undo_EndBlock("Insert Splice sample", -1);
-    ReaSpliceV04_Reply(identifier.UTF8String, jsonString(@{@"results":results}).UTF8String, nullptr);
+    ReaSpliceV05_Reply(identifier.UTF8String, jsonString(@{@"results":results}).UTF8String, nullptr);
     return;
   }
-  if (gDragSession) { ReaSpliceV04_Reply(identifier.UTF8String, nullptr, "A sample drag is already in progress."); return; }
+  if (gDragSession) { ReaSpliceV05_Reply(identifier.UTF8String, nullptr, "A sample drag is already in progress."); return; }
   NSEvent *event = gLastMouseEvent;
   if (!gWeb || !event || event.window != gWeb.window || !([NSEvent pressedMouseButtons] & 1)) {
-    ReaSpliceV04_Reply(identifier.UTF8String, nullptr, "Keep the mouse button held while dragging a downloaded sample into REAPER.");
+    ReaSpliceV05_Reply(identifier.UTF8String, nullptr, "Keep the mouse button held while dragging a downloaded sample into REAPER.");
     return;
   }
   NSPoint point = [gWeb convertPoint:event.locationInWindow fromView:nil];
@@ -322,7 +331,7 @@ static void handleBuiltinMessage(NSDictionary *body) {
   }
   gDragSession = [gWeb beginDraggingSessionWithItems:items event:event source:gController];
   gDragSession.animatesToStartingPositionsOnCancelOrFail = YES;
-  ReaSpliceV04_Reply(identifier.UTF8String, "{\"started\":true}", nullptr);
+  ReaSpliceV05_Reply(identifier.UTF8String, "{\"started\":true}", nullptr);
 }
 
 static NSString *bridgeScript() {
@@ -356,13 +365,13 @@ static NSString *bridgeScript() {
 }
 
 extern "C" __attribute__((visibility("default")))
-void ReaSpliceV04_SetMessageCallback(ReaSpliceMessageCallback callback) { gMessageCallback = callback; }
+void ReaSpliceV05_SetMessageCallback(ReaSpliceMessageCallback callback) { gMessageCallback = callback; }
 
 extern "C" __attribute__((visibility("default")))
-void *ReaSpliceV04_GetReaperAPI(const char *name) { return gGetAPI ? gGetAPI(name) : nullptr; }
+void *ReaSpliceV05_GetReaperAPI(const char *name) { return gGetAPI ? gGetAPI(name) : nullptr; }
 
 extern "C" __attribute__((visibility("default")))
-void ReaSpliceV04_Reply(const char *requestID, const char *resultJSON, const char *error) {
+void ReaSpliceV05_Reply(const char *requestID, const char *resultJSON, const char *error) {
   NSString *identifier = requestID ? [NSString stringWithUTF8String:requestID] : nil;
   if (!identifier) return;
   NSString *errorText = error ? [NSString stringWithUTF8String:error] : nil;
@@ -447,7 +456,7 @@ static void showDock() {
   WKWebViewConfiguration *configuration = [WKWebViewConfiguration new];
   configuration.websiteDataStore = [WKWebsiteDataStore nonPersistentDataStore];
   configuration.mediaTypesRequiringUserActionForPlayback = WKAudiovisualMediaTypeNone;
-  gController = [ReaSpliceControllerV04 new];
+  gController = [ReaSpliceControllerV05 new];
   [configuration.userContentController addScriptMessageHandler:gController name:@"splice"];
   NSString *configScript = [@"Object.defineProperty(window,'spliceRelay',{value:" stringByAppendingFormat:@"%@,writable:false});", jsonString(relayConfiguration())];
   [configuration.userContentController addUserScript:[[WKUserScript alloc]
@@ -533,6 +542,15 @@ static bool initialize(GetAPI api, RegisterAPI registration, HWND mainWindow) {
   import(SetExtState, api, "SetExtState");
   import(EnumProjects, api, "EnumProjects");
   import(Master_GetTempo, api, "Master_GetTempo");
+  import(gMonitoringAPI.master, api, "GetMasterTrack");
+  import(gMonitoringAPI.count, api, "TrackFX_GetRecCount");
+  import(gMonitoringAPI.config, api, "TrackFX_GetNamedConfigParm");
+  import(gMonitoringAPI.guid, api, "TrackFX_GetFXGUID");
+  import(gMonitoringAPI.add, api, "TrackFX_AddByName");
+  import(gMonitoringAPI.move, api, "TrackFX_CopyToTrack");
+  import(gMonitoringAPI.offline, api, "TrackFX_SetOffline");
+  import(gMonitoringAPI.enable, api, "TrackFX_SetEnabled");
+  import(gMonitoringAPI.show, api, "TrackFX_Show");
   import(InsertMedia, api, "InsertMedia");
   import(Undo_BeginBlock, api, "Undo_BeginBlock");
   import(Undo_EndBlock, api, "Undo_EndBlock");
@@ -560,8 +578,8 @@ static bool initialize(GetAPI api, RegisterAPI registration, HWND mainWindow) {
   registration("accelerator", &gAccelerator);
   gInitialized = true;
   if (SetExtState) {
-    SetExtState("ReaSplice", "native_version", "0.4.0", false);
-    SetExtState("ReaSplice", "native_capabilities", "project.tempo,tempo.preferences", false);
+    SetExtState("ReaSplice", "native_version", "0.5.0", false);
+    SetExtState("ReaSplice", "native_capabilities", "project.tempo,tempo.preferences,bridge.ensure", false);
   }
   return true;
 }
@@ -577,7 +595,7 @@ static void shutdown() {
   gMessageCallback = nullptr;
   gProjectIDs = nil;
   gInitialized = false;
-  if (SetExtState && GetExtState && !std::strcmp(GetExtState("ReaSplice", "native_version"), "0.4.0")) {
+  if (SetExtState && GetExtState && !std::strcmp(GetExtState("ReaSplice", "native_version"), "0.5.0")) {
     SetExtState("ReaSplice", "native_version", "", false);
     SetExtState("ReaSplice", "native_capabilities", "", false);
   }
@@ -594,7 +612,7 @@ int ReaperPluginEntry(void *instance, ReaperPluginInfo *info) {
 // This entry does not touch Lua state, so it requires no Lua headers or symbols.
 // It uses the API pointer exported by the already-loaded js_ReaScriptAPI plugin.
 extern "C" __attribute__((visibility("default")))
-int ReaSpliceV04_Load(void *luaState) {
+int ReaSpliceV05_Load(void *luaState) {
   if (gInitialized) return 0;
   if (![NSThread isMainThread]) { reportError(@"Load the extension on REAPER's main thread."); return 0; }
   GetAPI api = nullptr;
@@ -617,7 +635,7 @@ int ReaSpliceV04_Load(void *luaState) {
     // Lua may release its dlopen reference when the script ends. Keep callbacks
     // and Objective-C classes resident for the remaining REAPER process lifetime.
     Dl_info moduleInfo{};
-    if (dladdr(reinterpret_cast<void *>(&ReaSpliceV04_Load), &moduleInfo) && moduleInfo.dli_fname)
+    if (dladdr(reinterpret_cast<void *>(&ReaSpliceV05_Load), &moduleInfo) && moduleInfo.dli_fname)
       gPinnedModule = dlopen(moduleInfo.dli_fname, RTLD_NOW | RTLD_LOCAL);
     if (!gPinnedModule) { shutdown(); reportError(@"Could not keep the extension loaded safely."); }
   }
@@ -625,14 +643,14 @@ int ReaSpliceV04_Load(void *luaState) {
 }
 
 extern "C" __attribute__((visibility("default")))
-int ReaSpliceV04_Unload(void *luaState) {
+int ReaSpliceV05_Unload(void *luaState) {
   shutdown();
   // Deliberately retain the module: Objective-C runtime classes cannot be unloaded.
   return 0;
 }
 
 extern "C" __attribute__((visibility("default")))
-int ReaSpliceV04_Reload(void *luaState) {
+int ReaSpliceV05_Reload(void *luaState) {
   if (gInitialized && [NSThread isMainThread]) {
     closeDock();
     showDock();

@@ -48,6 +48,8 @@
   let tempoSaving = Promise.resolve();
   let rangeEditing = false;
   let rangeCommitTimer;
+  let bridgeBusy = false;
+  const handledBridgeRequests = new Set();
   const heldKeys = new Map();
   try { if (localStorage.getItem('spliceDock.surface') === 'main') surface = 'main'; } catch (_) { /* Storage is optional in the native host. */ }
   requestedSurface = surface;
@@ -330,6 +332,26 @@
     if (wakeStatus) wakeStatus();
   }
 
+  async function handleBridge(request) {
+    if (bridgeBusy || handledBridgeRequests.has(request.id)) return;
+    bridgeBusy = true;
+    handledBridgeRequests.add(request.id);
+    if (handledBridgeRequests.size > 100) handledBridgeRequests.delete(handledBridgeRequests.values().next().value);
+    let ok = false;
+    try {
+      showMessage('Opening Splice Bridge in monitoring FX…');
+      const result = await native('bridge.ensure');
+      ok = true;
+      showMessage(result.created ? 'Splice Bridge added at the end of monitoring FX.' : 'Splice Bridge is ready at the end of monitoring FX.');
+    } catch (error) {
+      showMessage(error.message || 'Could not open Splice Bridge.', true);
+    } finally {
+      try { await control({ type: 'bridge-result', id: request.id, ok }); }
+      catch (error) { showMessage(`Bridge connection: ${error.message}`, true); }
+      bridgeBusy = false;
+    }
+  }
+
   function waitForStatus(delay) {
     if (statusUrgent) { statusUrgent = false; return Promise.resolve(); }
     return new Promise((resolve) => {
@@ -384,6 +406,7 @@
           if (lastFrameAt && !connected && Date.now() - lastFrameAt < 5000) setConnected();
           resizeSurface().catch(() => {});
           if (result.drag) handleDrag(result.drag);
+          if (result.bridgeRequest) handleBridge(result.bridgeRequest);
         }
       } catch (error) {
         if (generation !== session) return;

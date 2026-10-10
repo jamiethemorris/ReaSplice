@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>ReaSplice</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <div class="dock">
+      <header class="toolbar">
+        <div class="identity"><span id="connection-dot" class="connection-dot" aria-hidden="true"></span><span class="title">ReaSplice</span></div>
+        <div class="view-switch" role="group" aria-label="Splice app view"><button id="companion" class="active" aria-pressed="true" title="Companion view">Compact</button><button id="main" aria-pressed="false" title="Full Splice app">Full app</button></div>
+        <button id="reconnect" class="icon-button" title="Reconnect to Splice" aria-label="Reconnect to Splice"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M5.8 8a7 7 0 0 1 11.55-2.5L20 8M4 16l2.65 2.5A7 7 0 0 0 18.2 16"/></svg></button>
+        <button id="shutdown" class="icon-button" title="Stop ReaSplice" aria-label="Stop ReaSplice" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v9M7 6a8 8 0 1 0 10 0"/></svg></button>
+      </header>
+      <section id="tempo-controls" class="tempo-controls" aria-label="Search BPM preference">
+        <div class="tempo-options">
+          <div id="tempo-mode" class="tempo-modes" role="group" aria-label="Search BPM preference">
+            <button data-mode="none" aria-pressed="true" title="No BPM filter" disabled>Any BPM</button>
+            <button data-mode="exact" aria-pressed="false" title="Match project BPM" disabled>Project</button>
+            <button data-mode="range" aria-pressed="false" title="Search within a range of project BPM" disabled>Range</button>
+          </div>
+          <label id="tempo-range-label" class="tempo-range" hidden>± <input id="tempo-range" type="number" min="1" max="100" step="1" value="10" aria-label="BPM range either side of project tempo"></label>
+        </div>
+        <output id="tempo-note" class="tempo-note" aria-live="polite">Reading project tempo…</output>
+      </section>
+      <main id="viewport" class="viewport" tabindex="0" aria-label="Splice app. Interact with the app using your mouse and keyboard.">
+        <canvas id="surface" aria-hidden="true"></canvas>
+        <div id="connection-state" class="connection-state" role="status" aria-live="polite">
+          <div class="state-mark" id="state-mark"><span class="spinner"></span></div>
+          <h1 id="state-title">Connecting to Splice</h1>
+          <p id="state-description">Opening your Splice app in this dock.</p>
+          <div class="state-actions"><button id="launch" hidden>Launch ReaSplice</button><button id="retry" class="secondary" hidden>Try again</button></div>
+          <div id="state-detail" class="state-detail" hidden></div>
+        </div>
+        <div id="message" class="message" role="status" hidden><span id="message-text"></span><button id="dismiss-message" aria-label="Dismiss message">×</button></div>
+      </main>
+      <div id="resize-status" class="sr-only" role="status" aria-live="polite"></div>
+    </div>
+  </body>
+</html>

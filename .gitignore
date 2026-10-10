@@ -1,0 +1,31 @@
+# Generated private Splice runtime, relay token/configuration, and native binaries.
+/build/
+/native/build/
+*.app/
+*.dylib
+relay-config.json
+splice-runtime.json
+
+# Local investigation history and the unused standalone-library experiment.
+/notes/
+/ui/library-prototype/
+
+# Account/session files, credentials, samples, and local environment settings.
+.env
+.env.*
+*.pem
+*.key
+*.sqlite*
+*.db
+*.wav
+*.aif
+*.aiff
+*.flac
+*.mp3
+*.m4a
+
+# Editor, OS, and compiler output.
+.DS_Store
+*.log
+__pycache__/
+*.pyc

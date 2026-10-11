@@ -13,16 +13,11 @@ code, not a copy of Splice or any sounds.
 - **Compact and Full app views.** Compact uses Splice's responsive Companion UI;
   Full app provides its wider desktop interface.
 - **A separate REAPER docker tab.** Opens in docker 1 and can share the right-hand
-  docker with other tools. TK Workbench is not required.
+  docker with other tools. 
 - **Native sample drag-and-drop.** Download through Splice, then drag the prepared
   audio file into REAPER.
 - **Project-aware BPM searches.** Choose any BPM, the current project BPM, or an
   adjustable range around it in both Library and Browse sample searches.
-- **Matching appearance.** The header and BPM controls use Splice's dark grays and
-  blue accents. Scrollbars are hidden; mouse-wheel and trackpad scrolling remain
-  enabled.
-- **No extra macOS Dock icon.** The private Splice runtime stays available through
-  the REAPER panel.
 
 ## Requirements
 
@@ -35,8 +30,7 @@ code, not a copy of Splice or any sounds.
 - Xcode Command Line Tools, Python 3, and Git to build from source.
 - Node.js 18 or later only if you want to run the offline checks.
 
-Intel builds can be requested, but have not been tested. Windows and Linux are
-not supported by this Cocoa/WebKit host.
+This is a Cocoa/WebKit host, so for now only MacOS is supported. Tested on Apple Silicon.
 
 ## Install
 

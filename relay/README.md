@@ -78,11 +78,13 @@ scanner or renderer IPC streams. Preparation adds that startup call and makes
 initialization idempotent, with IPC registered before the asynchronous scan.
 Installation and compatibility states still come from Splice's own scanner and
 version checks. `bridge-renderer.js` redirects the genuine Bridge button into a
-bounded request/response handoff. The v0.5 native host loads or reuses Bridge on
-the master track's record-FX chain (REAPER's monitoring FX), puts it last, brings
+bounded request/response handoff. The v0.7 native host loads or reuses Bridge on
+the active project's normal master FX chain, puts it last, brings
 it online and enables it, then opens that chain. Only after host success does the
 renderer request the normal Splice connection. Installation alone does not
-establish a connection.
+establish a connection. Existing monitoring Bridge is migrated when the master
+has none; any remaining monitoring Bridge instances are bypassed after the master
+instance is ready. Other projects' master chains are not changed.
 
 Limitations requiring runtime validation: installed Electron/code-signing policy;
 OSR capture and CDP input; native dialogs and external authentication still use

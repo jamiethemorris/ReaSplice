@@ -95,7 +95,7 @@ def prepare(refresh=False):
             surface + ' Bridge button')
         for tooltip in ('Activate Bridge', 'Deactivate Bridge', 'Add Bridge to a track in your DAW'):
             renderer = replace_once(renderer, json.dumps(tooltip),
-                '"Open Bridge in REAPER monitoring FX"', surface + ' Bridge tooltip: ' + tooltip)
+                '"Open Bridge on the REAPER master"', surface + ' Bridge tooltip: ' + tooltip)
         renderers.append((bundle.relative_to(source_app), tempo_source + '\n' + bridge_source + '\n' + renderer))
         styles = list((source_app / surface).glob('styles.*.css'))
         if len(styles) != 1:

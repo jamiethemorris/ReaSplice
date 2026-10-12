@@ -6,8 +6,8 @@ build_dir="$project_root/native/build"
 mkdir -p "$build_dir"
 arch="${SPLICE_DOCK_ARCH:-arm64}"
 ui_file="$project_root/ui/index.html"
-output_file="$build_dir/reaper_reasplice-v05-$arch.dylib"
-temporary_file="$build_dir/.reaper_reasplice-v05-$arch.$$.dylib"
+output_file="$build_dir/reaper_reasplice-v07-$arch.dylib"
+temporary_file="$build_dir/.reaper_reasplice-v07-$arch.$$.dylib"
 trap 'rm -f "$temporary_file"' EXIT
 
 sources=("$project_root/native/host.mm")
@@ -17,7 +17,7 @@ fi
 
 xcrun clang++ -std=c++17 -dynamiclib -arch "$arch" -mmacosx-version-min=12.0 \
   -fobjc-arc -fvisibility=hidden -Wall -Wextra -Wno-unused-parameter \
-  -install_name "@rpath/reaper_reasplice-v05-$arch.dylib" \
+  -install_name "@rpath/reaper_reasplice-v07-$arch.dylib" \
   '-DSPLICE_DOCK_UI_PATH="'"$ui_file"'"' \
   -framework Cocoa -framework WebKit "${sources[@]}" \
   -o "$temporary_file"

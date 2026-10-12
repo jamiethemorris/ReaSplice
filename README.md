@@ -12,14 +12,14 @@ code, not a copy of Splice or any sounds.
 
 - **Compact and Full app views.** Compact uses Splice's responsive Companion UI;
   Full app provides its wider desktop interface.
-- **A separate REAPER docker tab.** Opens in docker 1 and can share the right-hand
-  docker with other tools. 
+- **A separate REAPER docker tab.** Remembers its dock location and can share the
+  right-hand docker with other tools.
 - **Native sample drag-and-drop.** Download through Splice, then drag the prepared
   audio file into REAPER.
 - **Project-aware BPM searches.** Choose any BPM, the current project BPM, or an
   adjustable range around it in both Library and Browse sample searches.
-- **Bridge in monitoring FX.** The Bridge button adds or opens Splice Bridge at
-  the end of REAPER's monitoring chain, reusing an existing instance.
+- **Bridge on the project master.** The Bridge button adds or opens Splice Bridge
+  as the last master FX in the active project, reusing an existing instance.
 
 ## Requirements
 
@@ -72,6 +72,11 @@ Run **ReaSplice.lua** to open or close the tab. Drag REAPER's docker divider to
 resize it. Choose **Compact** for a narrow side panel; **Full app** retains more
 of Splice's desktop layout requirements.
 
+Place the ReaSplice tab alongside your other right-hand dock tabs to share the
+whole sidebar. Closing, reopening, or reloading ReaSplice preserves that dock
+location instead of forcing a separate pane. REAPER stores the location in its
+own docking preferences.
+
 Browse or search through **Your Library** and **Browse**. To insert a sample,
 download it through Splice and drag its sample handle into the REAPER arrangement.
 Keep the mouse button held until the native file drag starts. Splice continues to
@@ -106,16 +111,23 @@ takes effect when opening their Samples results.
 
 Bridge is optional and separate from the BPM search preference. Install Splice
 Bridge, make sure REAPER has scanned it, then click **Bridge** in either Compact or
-Full app. ReaSplice adds it as the last monitoring FX, enables it, opens the chain,
-and asks Splice to connect. Subsequent clicks reuse the existing monitoring
-instance; if necessary, it is moved to the end. Other effects keep their relative
-order and settings. An existing Bridge inside a monitoring FX container is also
-reused and moved to the end of the top-level chain.
+Full app. ReaSplice adds it as the last effect in the active project's normal
+master FX chain, enables it, opens the chain, and asks Splice to connect.
+Subsequent clicks reuse that project's existing instance and move it to the end
+if necessary. Bridge inside a master FX container is also reused and moved to
+the end of the top-level chain. Other effects retain their order and settings.
 
-The button opens the monitoring instance instead of toggling Splice's connection.
-Monitoring FX are shared across projects; remove or bypass Bridge in that chain
-when you no longer want it running. The action does not add a project track or
-insert anything into the master track's normal FX chain.
+When upgrading from monitoring FX, the first click moves the existing global
+Bridge into the active project's master chain, retaining its settings. If that
+project already has Bridge, it is reused and any remaining monitoring Bridge
+instances are bypassed. Other monitoring effects are unchanged.
+
+The button opens the master instance instead of toggling Splice's connection.
+Each project keeps its own instance when saved; click Bridge in another project
+to set it up there. The action creates no extra track and is grouped in project
+undo history. It does not automatically bypass Bridge in other project tabs,
+so background-project connection behavior still needs verification. Master FX
+are part of the project's render path; stop Splice previews before rendering.
 
 ReaSplice initializes Splice 5.4.13's installation detector so an installed Bridge
 plugin is recognized. If you install Bridge while ReaSplice is running and the
@@ -140,11 +152,14 @@ button still says **Install Bridge**, stop and relaunch the private runtime.
   file drag, then release it over the arrangement.
 - **Bridge cannot be loaded:** check that Splice Bridge appears in REAPER's FX
   browser. If it was just installed, rescan plug-ins. Rebuild the native host and
-  rerun **ReaSplice.lua** when upgrading to the monitoring FX integration.
+  rerun **ReaSplice.lua** when upgrading to the master FX integration. Version 0.7
+  can replace the running 0.3–0.6 host without restarting REAPER. Stop the private
+  runtime, run `python3 relay/prepare-splice.py`, and launch it again to refresh
+  the Bridge tooltip.
 
 The older `Splice Dock.lua` and `Reload Splice Dock.lua` files are compatibility
 aliases. The keyboard shim and its build script are retained for the original
-prototype; the current v0.5 host includes keyboard routing and does not need them.
+prototype; the current v0.7 host includes keyboard routing and does not need them.
 
 ## How it works
 
@@ -166,9 +181,15 @@ details. The active code lives in `native/`, `ui/`, `relay/`, and `scripts/`.
 Live checks on the tested setup cover library/catalog browsing and searching,
 dock resizing, native dragging of owned samples, hidden-scrollbar wheel scrolling,
 and BPM filtering in Library and Browse. Mode/range preferences survive reloads.
-Bridge 5.1.1 installation detection, adding it to monitoring FX, the Connected
-state, and reusing the same instance on a second click are verified. Audio output
-and synchronization have not yet been verified by listening.
+Closing/reopening and reloading the 0.7 host keep ReaSplice in the same full-height
+docker as the other sidebar tabs. Persistence through a full REAPER restart uses
+REAPER's saved dock preference but has not been tested in this session.
+Live checks with Bridge 5.1.1 confirm migration to the last master FX slot, the
+Connected state, reuse on a second click, and removal of the migrated instance
+from monitoring FX. Offline master FX checks cover append/reuse, project
+isolation, container handling, migration from monitoring FX, preserving other
+effect states, and failed moves. Audio synchronization across project tabs
+remains unverified.
 
 Audio output, new-credit purchases, all desktop-only workflows, Intel builds and
 extremely narrow layouts have not been comprehensively verified. The integration
@@ -184,8 +205,8 @@ node relay/check-relay.js
 node relay/check-tempo.js
 node relay/check-bridge.js
 python3 -m py_compile relay/prepare-splice.py
-xcrun clang++ -std=c++17 native/check-monitoring.cpp -o /tmp/reasplice-check-monitoring
-/tmp/reasplice-check-monitoring
+xcrun clang++ -std=c++17 native/check-master.cpp -o /tmp/reasplice-check-master
+/tmp/reasplice-check-master
 ```
 
 These checks use mocks and do not access your Splice account or spend credits.

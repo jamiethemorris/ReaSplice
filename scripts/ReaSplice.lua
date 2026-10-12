@@ -1,27 +1,34 @@
 -- @description ReaSplice: Open or close the responsive Splice browser
--- @version 0.5.0
+-- @version 0.7.0
 local script = debug.getinfo(1, 'S').source:sub(2)
 local root = script:match('^(.*)/scripts/[^/]+$')
 if not root then error('Cannot resolve the ReaSplice project directory.') end
 local arch = reaper.GetOS() == 'macOS-arm64' and 'arm64' or 'x86_64'
 local action = reaper.NamedCommandLookup('_REASPLICETOGGLE')
-local expectedVersion = '0.5.0'
-local library = root .. '/native/build/reaper_reasplice-v05-' .. arch .. '.dylib'
+local expectedVersion = '0.7.0'
+local library = root .. '/native/build/reaper_reasplice-v07-' .. arch .. '.dylib'
 reaper.SetExtState('ReaSplice', 'ui_path', root .. '/ui/index.html', false)
 
 if action == 0 or reaper.GetToggleCommandState(action) == -1 or reaper.GetExtState('ReaSplice', 'native_version') ~= expectedVersion then
   -- Resolve the new module first. Versioned filenames, symbols and Objective-C
   -- classes let old machine code remain safely pinned while callbacks migrate.
-  local load, message = package.loadlib(library, 'ReaSpliceV05_Load')
-  if not load then error('Could not load ReaSplice 0.5: ' .. tostring(message)) end
-  local unloadNew, unloadMessage = package.loadlib(library, 'ReaSpliceV05_Unload')
-  if not unloadNew then error('Invalid ReaSplice 0.5 module: ' .. tostring(unloadMessage)) end
+  local load, message = package.loadlib(library, 'ReaSpliceV07_Load')
+  if not load then error('Could not load ReaSplice 0.7: ' .. tostring(message)) end
+  local unloadNew, unloadMessage = package.loadlib(library, 'ReaSpliceV07_Unload')
+  if not unloadNew then error('Invalid ReaSplice 0.7 module: ' .. tostring(unloadMessage)) end
   local restorePrevious, previousWasOpen
 
   if action ~= 0 and reaper.GetToggleCommandState(action) ~= -1 then
     local previousVersion = reaper.GetExtState('ReaSplice', 'native_version')
-    local suffix = previousVersion == '0.4.0' and '-v04-' or '-'
-    local prefix = previousVersion == '0.4.0' and 'ReaSpliceV04_' or 'ReaSplice_'
+    local previousModules = {
+      ['0.3.0'] = {'-', 'ReaSplice_'},
+      ['0.4.0'] = {'-v04-', 'ReaSpliceV04_'},
+      ['0.5.0'] = {'-v05-', 'ReaSpliceV05_'},
+      ['0.6.0'] = {'-v06-', 'ReaSpliceV06_'},
+    }
+    local module = previousModules[previousVersion]
+    if not module then error('Restart REAPER to upgrade this unknown ReaSplice host: ' .. previousVersion) end
+    local suffix, prefix = module[1], module[2]
     local previousLibrary = root .. '/native/build/reaper_reasplice' .. suffix .. arch .. '.dylib'
     local unload, problem = package.loadlib(previousLibrary, prefix .. 'Unload')
     restorePrevious = package.loadlib(previousLibrary, prefix .. 'Load')
@@ -47,7 +54,7 @@ if action == 0 or reaper.GetToggleCommandState(action) == -1 or reaper.GetExtSta
       restorePrevious()
       if previousWasOpen then reaper.Main_OnCommand(action, 0) end
     end
-    error('ReaSplice 0.5 did not initialize. The previous host was restored when available; see the REAPER console.')
+    error('ReaSplice 0.7 did not initialize. The previous host was restored when available; see the REAPER console.')
   end
 end
 if action == 0 or reaper.GetToggleCommandState(action) == -1 then

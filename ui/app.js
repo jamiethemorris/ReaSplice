@@ -339,10 +339,12 @@
     if (handledBridgeRequests.size > 100) handledBridgeRequests.delete(handledBridgeRequests.values().next().value);
     let ok = false;
     try {
-      showMessage('Opening Splice Bridge in monitoring FX…');
+      showMessage('Opening Splice Bridge on the project master…');
+      const host = await native('host.info');
+      if (!host.masterBridge) throw new Error('Run Reload ReaSplice.lua to enable Bridge on the project master.');
       const result = await native('bridge.ensure');
       ok = true;
-      showMessage(result.created ? 'Splice Bridge added at the end of monitoring FX.' : 'Splice Bridge is ready at the end of monitoring FX.');
+      showMessage(result.migrated ? 'Splice Bridge moved from monitoring FX to this project’s master.' : result.created ? 'Splice Bridge added at the end of master FX.' : 'Splice Bridge is ready at the end of master FX.');
     } catch (error) {
       showMessage(error.message || 'Could not open Splice Bridge.', true);
     } finally {

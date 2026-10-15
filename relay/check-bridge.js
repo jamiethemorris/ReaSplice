@@ -12,6 +12,22 @@ const component = {
   bridgePlaybackService: { async connect() { connects++; } }
 };
 (async () => {
+  const listeners = {};
+  let finishStop;
+  const engine = {
+    isActive$: { value: false, next(value) { this.value = value; } },
+    bridgeSupportsPreviewDownload$: { next() {} },
+    betterIpcRenderer: { on(name, handler) { listeners[name] = handler; } },
+    stop: () => new Promise(resolve => { finishStop = resolve; })
+  };
+  api.bindEngine(engine);
+  listeners['vst-connection-enabled'](null, { previewDownload: true });
+  const lost = listeners['vst-connection-lost']();
+  listeners['vst-connection-enabled'](null, { previewDownload: true });
+  finishStop(); await lost;
+  assert.equal(api.getEngineStatus().active, true, 'late disconnect completion cannot disable a newer connection');
+  const finalLost = listeners['vst-connection-lost'](); finishStop(); await finalLost;
+  assert.equal(api.getEngineStatus().active, false, 'a genuine final disconnect disables the engine');
   api.request(component);
   const first = api.getRequest().id;
   api.request(component);
@@ -24,10 +40,10 @@ const component = {
   assert.notEqual(second, first);
   await api.complete(second, true);
   assert.equal(api.getRequest(), null);
-  assert.equal(stops, 1); assert.equal(connects, 1);
+  assert.equal(stops, 0); assert.equal(connects, 0, 'renderer completion must not initiate another connection');
   assert.equal(component.isBridgeSuspended, false);
   assert.equal(component.isBridgeCoachMarkOpen, false);
   await api.complete(second, true);
-  assert.equal(connects, 1, 'duplicate completion must not reconnect');
-  console.log('Bridge renderer checks passed: click coalescing, stale replies, native errors, successful connection.');
+  assert.equal(connects, 0, 'duplicate completion must not reconnect');
+  console.log('Bridge renderer checks passed: click coalescing, stale replies, native errors, completion without optimistic connection.');
 })().catch(error => { console.error(error); process.exitCode = 1; });

@@ -48,8 +48,58 @@
   let tempoSaving = Promise.resolve();
   let rangeEditing = false;
   let rangeCommitTimer;
-  let bridgeBusy = false;
-  const handledBridgeRequests = new Set();
+  let bridgeInitialized = false;
+  let bridgePreferenceError = '';
+  let bridgeSaving = Promise.resolve();
+  let bridgeReady;
+  let bridgeState = { supported: false, connected: false, busy: false, switchMode: 'disconnect' };
+  let spliceVolumeStatus = null, volumeSession = null, volumeRevision = 0;
+  let previewGestureKey = null;
+  let bridgeTrackState = null, bridgeSoloSupported = false;
+  const bridgeVolume = window.createBridgeVolumeController({
+    request: (payload) => native('solo' in payload ? 'bridge.solo' : 'bridge.volume', payload),
+    onChange: (state) => { bridgeTrackState = state; previewVolume.observeTrack(state); renderSolo(); },
+    onError: (message) => showMessage(message, true)
+  });
+  const previewVolume = window.createPreviewVolumeController({
+    writeBridge: (volume) => bridgeVolume.setVolume(volume),
+    writeSplice: async (payload) => {
+      volumeRevision++;
+      try {
+        const result = await control({ type: 'volume', ...payload });
+        if (volumeSession === payload.sessionId) spliceVolumeStatus = result;
+        return result;
+      } finally { volumeRevision++; }
+    },
+    onChange: (state) => {
+      const slider = $('preview-volume');
+      slider.disabled = !state.enabled;
+      slider.min = state.min; slider.max = state.max;
+      slider.value = Math.max(state.min, Math.min(state.max, state.value));
+      slider.style.setProperty('--level', `${100 * (Number(slider.value) - state.min) / (state.max - state.min)}%`);
+      slider.setAttribute('aria-label', `${state.source} preview volume`);
+      slider.setAttribute('aria-valuetext', state.label);
+      $('preview-source').textContent = state.source;
+      $('preview-volume-value').textContent = state.label;
+      $('preview-control').classList.toggle('bridge-active', state.source === 'Bridge');
+      $('preview-control').title = state.source === 'Bridge'
+        ? 'Preview volume · Splice Bridge track fader' : 'Preview volume · Splice audio output';
+    },
+    onError: (message) => showMessage(message, true)
+  });
+  const bridge = window.createBridgeController({
+    readProject: () => native('project.tempo'),
+    ensure: async (payload) => {
+      await bridgeReady;
+      if (!bridgeInitialized) throw new Error(bridgePreferenceError || 'Run Reload ReaSplice.lua to update Bridge support.');
+      const result = await native('bridge.ensure', payload);
+      await bridgeVolume.refresh();
+      return result;
+    },
+    control,
+    onChange: (state) => { bridgeState = state; renderBridge(); },
+    onMessage: showMessage
+  });
   const heldKeys = new Map();
   try { if (localStorage.getItem('spliceDock.surface') === 'main') surface = 'main'; } catch (_) { /* Storage is optional in the native host. */ }
   requestedSurface = surface;
@@ -171,6 +221,52 @@
     messageTimer = setTimeout(() => { $('message').hidden = true; }, error ? 8000 : 4500);
   }
 
+  function renderBridge() {
+    renderSolo();
+    previewVolume.observe({ ready: relayReady, bridge: bridgeState, projectId: projectTempo?.projectId,
+      sessionId: volumeSession, surface, spliceVolume: spliceVolumeStatus });
+    const bridgeConnected = relayReady && bridgeState.connected;
+    $('bridge-state').textContent = !relayReady ? 'Unavailable' : bridgeConnected ? 'Connected' : 'Disconnected';
+    $('bridge-state').classList.toggle('connected', bridgeConnected);
+    $('bridge-state').title = bridgeState.error || (bridgeState.busy ? 'Updating Bridge connection…' : 'Actual Splice Bridge connection');
+    $('bridge-switch-mode').disabled = !bridgeInitialized;
+    $('bridge-switch-mode').value = bridgeState.switchMode;
+    $('bridge-switch-note').textContent = bridgePreferenceError || (bridgeState.switchMode === 'follow'
+      ? 'While Bridge is connected, move the connection to the active project’s Splice Bridge track. Other projects’ Bridge instances go offline.'
+      : 'Disconnect and preview through Splice. Connect Bridge again when you need it.');
+    $('bridge-disconnect').disabled = !bridgeState.connected || !relayReady;
+  }
+
+  function renderSolo() {
+    const button = $('bridge-solo');
+    const current = bridgeTrackState?.projectId === projectTempo?.projectId && !!bridgeTrackState?.trackId;
+    const solo = current && bridgeTrackState.solo === true;
+    const active = relayReady && bridgeState.connected && bridgeState.projectId === projectTempo?.projectId && !bridgeState.busy;
+    // A soloed hidden track must remain easy to unsolo even if Splice closes
+    // or Bridge disconnects. Starting solo requires the current Bridge output.
+    button.disabled = !bridgeSoloSupported || !current || (!active && !solo);
+    button.setAttribute('aria-pressed', String(solo));
+    button.title = !bridgeSoloSupported ? 'Reload ReaSplice to enable Bridge solo'
+      : solo ? 'Unsolo Splice Bridge track' : active ? 'Solo Splice Bridge track' : 'Connect Bridge to solo its track';
+  }
+
+  async function initializeBridge() {
+    if (!hasNative()) return;
+    try {
+      const host = await native('host.info');
+      bridgeSoloSupported = host.bridgeSolo === true;
+      if (!host.bridgeProjectRouting || !host.bridgeTrack) throw new Error('Run Reload ReaSplice.lua to enable the Bridge preview track.');
+      bridge.updatePreferences(await native('bridge.preferences'));
+      bridgeInitialized = true;
+    } catch (error) { bridgePreferenceError = error.message; }
+    renderBridge();
+  }
+
+  function setOptionsOpen(open) {
+    $('options-panel').hidden = !open;
+    $('options-button').setAttribute('aria-expanded', String(open));
+  }
+
   function selectSurface(next) {
     surface = next === 'main' ? 'main' : 'companion';
     ['main', 'companion'].forEach((name) => {
@@ -211,12 +307,15 @@
         if (Number.isFinite(current?.bpm) && current.bpm > 0) {
           if (current.bpm !== projectTempo?.bpm || current.projectId !== projectTempo?.projectId) {
             projectTempo = current;
+            bridgeVolume.updateProject(current.projectId);
+            bridge.updateProject(current.projectId);
             tempoRevision++;
             requestStatus();
           }
         } else throw new Error('Project tempo unavailable');
       } catch (error) { tempoError = error.message; }
       renderTempo();
+      if (bridgeInitialized) await bridgeVolume.refresh();
       await sleep(650);
     }
   }
@@ -305,10 +404,7 @@
     consumedDrag = drag.id;
     let started = false;
     try {
-      if (!(pointer.buttons & 1)) {
-        showMessage('Keep the mouse button held while dragging the sound into REAPER.');
-        return;
-      }
+      if (!(pointer.buttons & 1)) return;
       // Start Cocoa's drag while the physical button is still held. Pending
       // moves are discarded and the remote button is released immediately after.
       cancelMove();
@@ -332,28 +428,6 @@
     if (wakeStatus) wakeStatus();
   }
 
-  async function handleBridge(request) {
-    if (bridgeBusy || handledBridgeRequests.has(request.id)) return;
-    bridgeBusy = true;
-    handledBridgeRequests.add(request.id);
-    if (handledBridgeRequests.size > 100) handledBridgeRequests.delete(handledBridgeRequests.values().next().value);
-    let ok = false;
-    try {
-      showMessage('Opening Splice Bridge on the project master…');
-      const host = await native('host.info');
-      if (!host.masterBridge) throw new Error('Run Reload ReaSplice.lua to enable Bridge on the project master.');
-      const result = await native('bridge.ensure');
-      ok = true;
-      showMessage(result.migrated ? 'Splice Bridge moved from monitoring FX to this project’s master.' : result.created ? 'Splice Bridge added at the end of master FX.' : 'Splice Bridge is ready at the end of master FX.');
-    } catch (error) {
-      showMessage(error.message || 'Could not open Splice Bridge.', true);
-    } finally {
-      try { await control({ type: 'bridge-result', id: request.id, ok }); }
-      catch (error) { showMessage(`Bridge connection: ${error.message}`, true); }
-      bridgeBusy = false;
-    }
-  }
-
   function waitForStatus(delay) {
     if (statusUrgent) { statusUrgent = false; return Promise.resolve(); }
     return new Promise((resolve) => {
@@ -371,12 +445,17 @@
   async function statusLoop(generation) {
     while (generation === session && config) {
       try {
-        const version = surfaceVersion;
+        const version = surfaceVersion, volumeVersion = volumeRevision;
         const result = await (await request('/status')).json();
         if (generation !== session) return;
         lastStatusAt = Date.now();
         statusFailures = 0;
         relayReady = Boolean(result.ready);
+        volumeSession = result.bridge?.sessionId || null;
+        if (volumeVersion === volumeRevision) spliceVolumeStatus = result.volume || null;
+        await bridgeReady;
+        if (generation !== session) return;
+        bridge.observe(result.bridge);
         if (Number.isFinite(result.seq) && result.seq < frameSequence) { frameSequence = 0; consumedDrag = null; needsSurfaceRestore = true; sentTempo = ''; }
         if (Number(result.width) > 0) sourceWidth = Number(result.width);
         if (Number(result.height) > 0) sourceHeight = Number(result.height);
@@ -408,18 +487,20 @@
           if (lastFrameAt && !connected && Date.now() - lastFrameAt < 5000) setConnected();
           resizeSurface().catch(() => {});
           if (result.drag) handleDrag(result.drag);
-          if (result.bridgeRequest) handleBridge(result.bridgeRequest);
+          if (result.bridgeRequest) bridge.connectRequest(result.bridgeRequest);
         }
       } catch (error) {
         if (generation !== session) return;
         statusFailures += 1;
         relayReady = false;
+        renderBridge();
         needsSurfaceRestore = true;
         if (statusFailures >= 2 && hasNative()) {
           const fresh = await readConfig();
           if (generation !== session) return;
           if (fresh && (fresh.token !== config.token || fresh.baseUrl !== config.baseUrl)) {
             config = fresh;
+            bridge.reset();
             frameSequence = 0;
             consumedDrag = null;
             lastResize = '';
@@ -472,6 +553,7 @@
     lastStatusAt = 0;
     lastResize = '';
     relayReady = false;
+    bridge.reset();
     sentTempo = '';
     needsSurfaceRestore = true;
     selectSurface(requestedSurface);
@@ -504,6 +586,7 @@
       ++session;
       requestStatus();
       relayReady = false;
+      bridge.reset();
       canvas.classList.remove('visible');
       setState('ReaSplice is stopped', 'You can now use the regular Splice app, or launch the dock copy again.', { canLaunch: hasNative() });
     } catch (error) {
@@ -668,6 +751,40 @@
   $('retry').addEventListener('click', connect);
   $('launch').addEventListener('click', launch);
   $('dismiss-message').addEventListener('click', () => { $('message').hidden = true; });
+  $('options-button').addEventListener('click', () => setOptionsOpen($('options-panel').hidden));
+  document.addEventListener('pointerdown', (event) => {
+    if (!event.target.closest('#options-panel, #options-button')) setOptionsOpen(false);
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && !$('options-panel').hidden) {
+      setOptionsOpen(false);
+      $('options-button').focus();
+      event.stopPropagation();
+    }
+  });
+  $('preview-volume').addEventListener('pointerdown', () => { previewGestureKey = previewVolume.state().key; });
+  $('preview-volume').addEventListener('keydown', () => { previewGestureKey ??= previewVolume.state().key; });
+  $('preview-volume').addEventListener('input', () => {
+    previewVolume.setValue(Number($('preview-volume').value), previewGestureKey ?? previewVolume.state().key);
+  });
+  for (const event of ['pointerup', 'pointercancel', 'keyup', 'blur']) {
+    $('preview-volume').addEventListener(event, () => { previewGestureKey = null; });
+  }
+  $('bridge-disconnect').addEventListener('click', () => { bridge.disconnectRequest(); requestStatus(); });
+  $('bridge-solo').addEventListener('click', () => {
+    if (!$('bridge-solo').disabled) bridgeVolume.setSolo(bridgeTrackState?.solo !== true);
+  });
+  $('bridge-switch-mode').addEventListener('change', () => {
+    const preference = { switchMode: $('bridge-switch-mode').value };
+    bridge.updatePreferences(preference);
+    bridgeSaving = bridgeSaving.catch(() => {}).then(async () => {
+      await native('bridge.preferences', preference);
+      bridgePreferenceError = '';
+    }).catch((error) => {
+      bridgePreferenceError = `Could not save Bridge preference: ${error.message}`;
+      showMessage(bridgePreferenceError, true);
+    }).finally(renderBridge);
+  });
   $('tempo-mode').querySelectorAll('button').forEach((button) => button.addEventListener('click', () => changeTempoPreference(button.dataset.mode)));
   $('tempo-range').addEventListener('change', () => changeTempoPreference());
   $('tempo-range').addEventListener('pointerdown', () => {
@@ -688,6 +805,7 @@
     }, 350);
   });
   selectSurface(surface);
+  bridgeReady = initializeBridge();
   tempoLoop();
   connect();
 })();

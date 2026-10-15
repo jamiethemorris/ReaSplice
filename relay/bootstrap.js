@@ -7,6 +7,7 @@ const path = require('node:path');
 const http = require('node:http');
 const crypto = require('node:crypto');
 const { app, ipcMain } = require('electron');
+const bridgeSession = require('./bridge-session.js')();
 
 const options = JSON.parse(fs.readFileSync(path.join(__dirname, 'dock-options.json'), 'utf8'));
 const config = JSON.parse(fs.readFileSync(options.configPath, 'utf8'));
@@ -79,6 +80,7 @@ function rememberError(error) { lastError = String(error?.message || error).slic
 
 // prepare-splice.py inserts only these bounded hooks into its copied index.js.
 globalThis.__spliceDock = {
+  bridgeManager(manager) { bridgeSession.attach(manager); },
   windowOptions(name, original) {
     if (!isDesktop(name)) return original;
     return {
@@ -99,6 +101,13 @@ globalThis.__spliceDock = {
   updatesDisabled: true
 };
 
+function publishPreparedDrag(record) {
+  if (record.name !== selected || !(record.buttons & 1) || !record.dragMoved || !record.preparedDrag) return;
+  diagnostics.dragPrepared++;
+  drag = { id: ++dragId, ...record.preparedDrag };
+  record.preparedDrag = null;
+}
+
 function registerWindow(name, window) {
   const wc = window.webContents;
   const record = {
@@ -106,7 +115,8 @@ function registerWindow(name, window) {
     originalMax: name === 'main' ? [0, 0] : [480, 1400],
     frame: null, frameWidth: 0, frameHeight: 0, frameSeq: 0,
     loaded: false, buttons: 0, debuggerReady: null,
-    tempo: null, tempoRevision: -1, tempoBusy: false, bridgeBusy: false
+    dragOrigin: null, dragMoved: false, preparedDrag: null,
+    tempo: null, tempoRevision: -1, tempoBusy: false, bridgeBusy: false, bridgeEngine: null
   };
   windows.set(name, record);
   wc.setBackgroundThrottling(false);
@@ -124,11 +134,13 @@ function registerWindow(name, window) {
     });
     if (!files.length) {
       diagnostics.dragRejected++;
-      lastError = 'Splice has not prepared a local file for this drag yet.';
       return;
     }
-    diagnostics.dragPrepared++;
-    drag = { id: ++dragId, files, icon: typeof payload.icon === 'string' ? payload.icon : payload.icon?.toDataURL?.() || null };
+    // Splice may prepare a drag before any real drag gesture. A click, a late
+    // preparation after release, or an unavailable placeholder should be silent.
+    if (!(record.buttons & 1) || !record.dragOrigin || selected !== name) return;
+    record.preparedDrag = { files, icon: typeof payload.icon === 'string' ? payload.icon : payload.icon?.toDataURL?.() || null };
+    publishPreparedDrag(record);
   };
   window.on('show', () => {
     if (docked) window.hide();
@@ -173,11 +185,15 @@ async function refreshTempo(record) {
 async function refreshBridge(record) {
   if (!alive(record) || !record.loaded || record.bridgeBusy) return;
   record.bridgeBusy = true;
+  const volumeRevision = record.volumeRevision || 0;
   try {
     const request = await record.window.webContents.executeJavaScript(
-      'globalThis.__reaSpliceBridge?.getRequest() || null', false);
-    if (request && typeof request.id === 'string' && /^[a-z0-9-]{1,100}$/i.test(request.id)) {
-      if (!bridgeRequest) bridgeRequest = { id: request.id, surface: record.name };
+      '({request:globalThis.__reaSpliceBridge?.getRequest() || null,engine:globalThis.__reaSpliceBridge?.getEngineStatus() || null,volume:globalThis.__reaSpliceVolume?.getStatus() || null})', false);
+    record.bridgeEngine = request?.engine || null;
+    if (!record.volumeWriting && volumeRevision === (record.volumeRevision || 0)) record.volume = request?.volume || null;
+    const pending = request?.request;
+    if (pending && typeof pending.id === 'string' && /^[a-z0-9-]{1,100}$/i.test(pending.id)) {
+      if (!bridgeRequest) bridgeRequest = { id: pending.id, surface: record.name };
     } else if (bridgeRequest?.surface === record.name) bridgeRequest = null;
   } catch (error) { rememberError(error); }
   finally { record.bridgeBusy = false; }
@@ -189,9 +205,14 @@ async function finishBridge(command) {
   const request = bridgeRequest;
   const record = windows.get(request.surface);
   if (!alive(record)) { bridgeRequest = null; return; }
-  await record.window.webContents.executeJavaScript(
-    `globalThis.__reaSpliceBridge?.complete(${JSON.stringify(request.id)}, ${command.ok})`, false);
-  if (bridgeRequest?.id === request.id) bridgeRequest = null;
+  let ok = false;
+  try {
+    if (command.ok) { await bridgeSession.connect(command.projectId); ok = true; }
+  } finally {
+    await record.window.webContents.executeJavaScript(
+      `globalThis.__reaSpliceBridge?.complete(${JSON.stringify(request.id)}, ${ok})`, false);
+    if (bridgeRequest?.id === request.id) bridgeRequest = null;
+  }
 }
 
 function validateTempo(command) {
@@ -293,6 +314,19 @@ async function dispatchInput(event) {
     const buttonBit = { left: 1, right: 2, middle: 4, back: 8, forward: 16 }[button] || 0;
     if (event.type === 'mouseDown') record.buttons |= buttonBit;
     if (event.type === 'mouseUp') record.buttons &= ~buttonBit;
+    if (event.type === 'mouseDown' && button === 'left') {
+      record.dragOrigin = { x, y };
+      record.dragMoved = false;
+      record.preparedDrag = null;
+      drag = null;
+    } else if (event.type === 'mouseUp' && button === 'left') {
+      record.dragOrigin = null;
+      record.dragMoved = false;
+      record.preparedDrag = null;
+    } else if (event.type === 'mouseMove' && (record.buttons & 1) && record.dragOrigin) {
+      if (Math.hypot(x - record.dragOrigin.x, y - record.dragOrigin.y) >= 4) record.dragMoved = true;
+      publishPreparedDrag(record);
+    }
     if (event.type === 'mouseMove' && button === 'none' && record.buttons) {
       button = record.buttons & 1 ? 'left' : record.buttons & 2 ? 'right' : record.buttons & 4 ? 'middle' : record.buttons & 8 ? 'back' : 'forward';
     }
@@ -339,8 +373,8 @@ function status(includeDiagnostics = false) {
     seq: record?.frameSeq || 0, frameWidth: record?.frameWidth || 0, frameHeight: record?.frameHeight || 0,
     drag, error: lastError, docked, surfaces: Array.from(windows.keys()), version: 1,
     applicationName: 'ReaSplice', macDockVisible: process.platform === 'darwin' ? app.dock?.isVisible() ?? null : null,
-    tempo: record?.tempo || null, bridgeRequest };
-  if (includeDiagnostics) result.diagnostics = diagnostics;
+    tempo: record?.tempo || null, volume: record?.volume || null, bridgeRequest, bridge: bridgeSession.status() };
+  if (includeDiagnostics) { result.diagnostics = diagnostics; result.bridgeEngines = Object.fromEntries(Array.from(windows, ([name, win]) => [name, win.bridgeEngine])); }
   return result;
 }
 
@@ -400,7 +434,24 @@ async function control(command) {
       break;
     }
     case 'surface': docked = true; await selectSurface(command.surface); break;
+    case 'volume': {
+      if (!Number.isFinite(command.volume) || command.volume < 0 || command.volume > 1) throw new Error('Invalid Splice volume');
+      if (command.sessionId !== bridgeSession.status().sessionId) throw new Error('Splice restarted; try the volume control again');
+      if (!['companion', 'main'].includes(command.surface)) throw new Error('Invalid Splice volume surface');
+      if (bridgeSession.status().connected) throw new Error('Bridge is now active; adjust its preview volume instead');
+      const record = windows.get(command.surface);
+      if (!alive(record) || !record.loaded) throw new Error('Splice volume is not ready');
+      record.volumeRevision = (record.volumeRevision || 0) + 1;
+      record.volumeWriting = true;
+      try {
+        record.volume = await record.window.webContents.executeJavaScript(
+          `globalThis.__reaSpliceVolume.setVolume(${command.volume})`, false);
+      } finally { record.volumeWriting = false; record.volumeRevision++; }
+      return record.volume;
+    }
     case 'bridge-result': await finishBridge(command); break;
+    case 'bridge-disconnect': await bridgeSession.disconnect(); break;
+    case 'bridge-connect': await bridgeSession.connect(command.projectId); break;
     case 'drag-ack': if (drag?.id === command.id) { diagnostics.dragAcknowledged++; drag = null; } break;
     case 'restore': restore(); break;
     case 'shutdown':

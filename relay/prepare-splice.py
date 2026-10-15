@@ -68,11 +68,16 @@ def prepare(refresh=False):
         '  async init() {\n    this.finder = new PluginFinder();\n    this.refreshInstalled();\n    this.setupIpc();\n  }',
         '  async init() {\n    if (this.finder) return;\n    this.finder = new PluginFinder();\n    this.setupIpc();\n    await this.refreshInstalled();\n  }',
         'Bridge installation detector initialization')
+    index = replace_once(index,
+        '    this.isVstConnected$ = this._isVstConnected$.asObservable();',
+        '    this.isVstConnected$ = this._isVstConnected$.asObservable();\n    globalThis.__spliceDock.bridgeManager(this);',
+        'Bridge connection observer')
 
     # Keep the native filter chips and the actual search request in agreement:
     # the private renderer uses Splice's own sample-search presenter/router.
     tempo_source = (ROOT / 'relay/tempo-renderer.js').read_text()
     bridge_source = (ROOT / 'relay/bridge-renderer.js').read_text()
+    volume_source = (ROOT / 'relay/volume-renderer.js').read_text()
     renderer_css = (ROOT / 'relay/renderer.css').read_text()
     renderers = []
     stylesheets = []
@@ -90,13 +95,25 @@ def prepare(refresh=False):
             'ngOnDestroy(){this.globalSearch.unregister(this)}',
             'ngOnDestroy(){globalThis.__reaSpliceTempo?.unregister(this),this.globalSearch.unregister(this)}',
             surface + ' sample search cleanup')
+        # Guard the shipped asynchronous disconnect handler against a newer
+        # connection event arriving while stop() is still awaiting IPC.
+        receiver, helper, inner, arg, feature = ('a', 'He', 'o', 'h', 'w') if surface == 'desktop-companion' else ('C', 'qt', 'h', 'M', 'H')
+        original_binding = (
+            f'bindIpcEvents(){{var {receiver}=this;this.betterIpcRenderer.on("vst-connection-enabled",function(){{var {inner}=(0,{helper}.A)(function*({arg},{{previewDownload:{feature}}}){{'
+            f'{receiver}.bridgeSupportsPreviewDownload$.next({feature}),{receiver}.isActive$.next(!0)}});return function({arg},{feature}){{return {inner}.apply(this,arguments)}}}}()),'
+            f'this.betterIpcRenderer.on("vst-connection-lost",(0,{helper}.A)(function*(){{yield {receiver}.stop(),{receiver}.isActive$.next(!1)}}))}}')
+        renderer = replace_once(renderer, original_binding,
+            'bindIpcEvents(){globalThis.__reaSpliceBridge.bindEngine(this)}', surface + ' Bridge connection event ordering')
         renderer = replace_once(renderer, 'onBridgeClick(){',
             'onBridgeClick(){return globalThis.__reaSpliceBridge.request(this)}__reaSpliceOriginalBridgeClick(){',
             surface + ' Bridge button')
+        renderer = replace_once(renderer, 'this.initializeVolume(),',
+            'globalThis.__reaSpliceVolume.bind(this.playbackService,this.zone),this.initializeVolume(),',
+            surface + ' playback volume service')
         for tooltip in ('Activate Bridge', 'Deactivate Bridge', 'Add Bridge to a track in your DAW'):
             renderer = replace_once(renderer, json.dumps(tooltip),
-                '"Open Bridge on the REAPER master"', surface + ' Bridge tooltip: ' + tooltip)
-        renderers.append((bundle.relative_to(source_app), tempo_source + '\n' + bridge_source + '\n' + renderer))
+                '"Connect Bridge to REAPER"', surface + ' Bridge tooltip: ' + tooltip)
+        renderers.append((bundle.relative_to(source_app), tempo_source + '\n' + bridge_source + '\n' + volume_source + '\n' + renderer))
         styles = list((source_app / surface).glob('styles.*.css'))
         if len(styles) != 1:
             raise RuntimeError(f'Splice layout changed: expected one {surface} stylesheet')
@@ -131,6 +148,7 @@ def prepare(refresh=False):
     for relative, stylesheet in stylesheets:
         (app_dir / relative).write_text(stylesheet)
     shutil.copyfile(ROOT / 'relay/bootstrap.js', app_dir / 'dock-bootstrap.js')
+    shutil.copyfile(ROOT / 'relay/bridge-session.js', app_dir / 'bridge-session.js')
     package['main'] = 'dock-bootstrap.js'
     (app_dir / 'package.json').write_text(json.dumps(package, indent=2) + '\n')
     config_path = BUILD / 'relay-config.json'

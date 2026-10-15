@@ -7,7 +7,7 @@
 #include <cstring>
 #include <cmath>
 #include "host_api.h"
-#include "master-bridge.h"
+#include "bridge-track.h"
 
 // Minimal ABI declarations corresponding to Cockos' public REAPER/SWELL SDK.
 // Sources: https://github.com/justinfrankel/reaper-sdk/blob/main/sdk/reaper_plugin.h
@@ -67,7 +67,7 @@ static const char *(*GetExtState)(const char *, const char *);
 static void (*SetExtState)(const char *, const char *, const char *, bool);
 static void *(*EnumProjects)(int, char *, int);
 static double (*Master_GetTempo)();
-static reasplice::MasterBridgeAPI gMasterBridgeAPI{};
+static reasplice::BridgeAPI gBridgeAPI{};
 static NSMutableDictionary<NSValue *, NSString *> *gProjectIDs;
 static HWND (*SwellCreateDialog)(void *, const char *, HWND, WindowProc, LPARAM);
 static void (*SwellDestroyWindow)(HWND);
@@ -75,6 +75,7 @@ static LRESULT (*SwellDefWindowProc)(HWND, unsigned, WPARAM, LPARAM);
 static int (*SwellSetDlgItemText)(HWND, int, const char *);
 static int (*InsertMedia)(const char *, int);
 static void (*Undo_BeginBlock)();
+static void (*MarkProjectDirty)(void *);
 static void (*Undo_EndBlock)(const char *, int);
 static ActionRegistration gAction{{0, 0, 0}, "ReaSplice: Toggle sample browser"};
 
@@ -120,11 +121,11 @@ static NSDictionary *relayConfiguration() {
   return [result isKindOfClass:[NSDictionary class]] ? result : @{};
 }
 
-@interface ReaSpliceControllerV07 : NSObject <WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate, NSDraggingSource>
+@interface ReaSpliceControllerV10 : NSObject <WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate, NSDraggingSource>
 @end
-static ReaSpliceControllerV07 *gController;
+static ReaSpliceControllerV10 *gController;
 
-@implementation ReaSpliceControllerV07
+@implementation ReaSpliceControllerV10
 - (void)userContentController:(WKUserContentController *)controller didReceiveScriptMessage:(WKScriptMessage *)message {
   if (!message.frameInfo.isMainFrame || !allowedURL(message.frameInfo.request.URL)) return;
   if (![message.body isKindOfClass:[NSDictionary class]]) return;
@@ -135,16 +136,16 @@ static ReaSpliceControllerV07 *gController;
   NSString *request = jsonString(body);
   if (!request || request.length > 1024 * 1024) return;
   if ([body[@"type"] isEqualToString:@"host.info"]) {
-    NSString *result = jsonString(@{@"name": @"ReaSplice", @"version": @"0.7.0",
+    NSString *result = jsonString(@{@"name": @"ReaSplice", @"version": @"0.10.0",
                                     @"docker": @(dockIndex(gHost)), @"keyboardRouting": @YES, @"projectTempo": @YES,
-                                    @"tempoPreferences": @YES, @"masterBridge": @YES, @"uiFile": gAllowedFile ?: @""});
-    ReaSpliceV07_Reply([body[@"id"] UTF8String], result.UTF8String, nullptr);
-  } else if ([@[@"drag", @"insert", @"launch", @"relay.config", @"project.tempo", @"tempo.preferences", @"bridge.ensure"] containsObject:body[@"type"]]) {
+                                    @"tempoPreferences": @YES, @"bridgeTrack": @YES, @"bridgeSolo": @YES, @"bridgeProjectRouting": @YES, @"uiFile": gAllowedFile ?: @""});
+    ReaSpliceV10_Reply([body[@"id"] UTF8String], result.UTF8String, nullptr);
+  } else if ([@[@"drag", @"insert", @"launch", @"relay.config", @"project.tempo", @"tempo.preferences", @"bridge.preferences", @"bridge.ensure", @"bridge.volume", @"bridge.solo"] containsObject:body[@"type"]]) {
     handleBuiltinMessage(body);
   } else if (gMessageCallback) {
     gMessageCallback(request.UTF8String);
   } else {
-    ReaSpliceV07_Reply([body[@"id"] UTF8String], nullptr, "The sample-library bridge is not loaded.");
+    ReaSpliceV10_Reply([body[@"id"] UTF8String], nullptr, "The sample-library bridge is not loaded.");
   }
 }
 - (void)webView:(WKWebView *)webView decidePolicyForNavigationAction:(WKNavigationAction *)action decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
@@ -236,14 +237,35 @@ static NSDictionary *tempoPreferences(NSDictionary *updates, NSString **error) {
   return result;
 }
 
-static NSDictionary *projectTempo(NSString **error) {
-  if (!EnumProjects || !Master_GetTempo) { *error = @"REAPER's project tempo API is unavailable."; return nil; }
-  // Read both on the main thread on every request, so project switches and BPM
-  // edits take effect immediately. Master_GetTempo is read-only and refers to
-  // the currently active project; no undocumented GetSetProjectInfo key is used.
+static NSDictionary *bridgePreferences(NSDictionary *updates, NSString **error) {
+  if (!GetExtState || !SetExtState) { *error = @"REAPER's preference storage is unavailable."; return nil; }
+  NSArray *modes = @[@"disconnect", @"follow"];
+  NSString *mode = @"disconnect";
+  const char *stored = GetExtState("ReaSplice", "bridge_preferences");
+  if (stored && stored[0]) {
+    NSData *data = [[NSString stringWithUTF8String:stored] dataUsingEncoding:NSUTF8StringEncoding];
+    id preferences = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+    if ([preferences isKindOfClass:[NSDictionary class]] && [modes containsObject:preferences[@"switchMode"]])
+      mode = preferences[@"switchMode"];
+  }
+  NSString *previous = mode;
+  if (updates[@"switchMode"]) {
+    if (![updates[@"switchMode"] isKindOfClass:[NSString class]] || ![modes containsObject:updates[@"switchMode"]]) {
+      *error = @"Bridge switch mode must be disconnect or follow.";
+      return nil;
+    }
+    mode = updates[@"switchMode"];
+  }
+  NSDictionary *result = @{@"switchMode":mode};
+  if (![mode isEqualToString:previous])
+    SetExtState("ReaSplice", "bridge_preferences", jsonString(result).UTF8String, true);
+  return result;
+}
+
+static NSString *activeProjectID(NSString **error) {
+  if (!EnumProjects) { *error = @"REAPER's project API is unavailable."; return nil; }
   void *project = EnumProjects(-1, nullptr, 0);
-  double bpm = Master_GetTempo();
-  if (!project || !std::isfinite(bpm) || bpm <= 0) { *error = @"No valid active project tempo is available."; return nil; }
+  if (!project) { *error = @"No active project is available."; return nil; }
   if (!gProjectIDs) gProjectIDs = [NSMutableDictionary dictionary];
   NSMutableSet<NSValue *> *openProjects = [NSMutableSet set];
   for (int index = 0; ; ++index) {
@@ -255,41 +277,102 @@ static NSDictionary *projectTempo(NSString **error) {
     if (![openProjects containsObject:key]) [gProjectIDs removeObjectForKey:key];
   NSValue *key = [NSValue valueWithPointer:project];
   if (!gProjectIDs[key]) gProjectIDs[key] = NSUUID.UUID.UUIDString;
-  return @{@"bpm":@(bpm), @"projectId":gProjectIDs[key]};
+  return gProjectIDs[key];
+}
+
+static NSDictionary *projectTempo(NSString **error) {
+  if (!Master_GetTempo) { *error = @"REAPER's project tempo API is unavailable."; return nil; }
+  // Both reads happen on the main thread, so a request refers to one project.
+  NSString *projectID = activeProjectID(error);
+  if (!projectID) return nil;
+  double bpm = Master_GetTempo();
+  if (!std::isfinite(bpm) || bpm <= 0) { *error = @"No valid active project tempo is available."; return nil; }
+  return @{@"bpm":@(bpm), @"projectId":projectID};
 }
 
 static void handleBuiltinMessage(NSDictionary *body) {
   NSString *identifier = body[@"id"], *type = body[@"type"];
   NSDictionary *payload = body[@"payload"];
+  if ([type isEqualToString:@"bridge.volume"] || [type isEqualToString:@"bridge.solo"]) {
+    NSString *error = nil;
+    NSString *projectID = activeProjectID(&error);
+    void *track = reasplice::findBridgeTrack(gBridgeAPI);
+    NSString *trackID = track ? @(reasplice::trackString(gBridgeAPI, track, "GUID").c_str()) : @"";
+    id volume = payload[@"volume"];
+    id solo = payload[@"solo"];
+    if (!gBridgeAPI.trackValue) error = @"REAPER's track controls are unavailable.";
+    if (volume || solo) {
+      if (![payload[@"projectId"] isKindOfClass:[NSString class]] || ![payload[@"projectId"] isEqualToString:projectID] ||
+          !track || ![payload[@"trackId"] isKindOfClass:[NSString class]] || !trackID.length || ![payload[@"trackId"] isEqualToString:trackID])
+        error = @"The preview track or active project changed. Try the control again.";
+      else if (solo && (volume || ![type isEqualToString:@"bridge.solo"] || ![solo isKindOfClass:[NSNumber class]] ||
+          CFGetTypeID((__bridge CFTypeRef)solo) != CFBooleanGetTypeID()))
+        error = @"Preview solo must be a boolean.";
+      else if (volume && (![type isEqualToString:@"bridge.volume"] || ![volume isKindOfClass:[NSNumber class]] || CFGetTypeID((__bridge CFTypeRef)volume) == CFBooleanGetTypeID() ||
+          !std::isfinite([volume doubleValue]) || [volume doubleValue] < 0 || [volume doubleValue] > 4)
+        )
+        error = @"Invalid preview volume.";
+      if (!error) {
+        // Solo in place respects the preview track's normal routing. Change
+        // this track only; preserve every other track's existing solo state.
+        if (solo && Undo_BeginBlock && Undo_EndBlock) Undo_BeginBlock();
+        if (!gBridgeAPI.setTrackValue || !gBridgeAPI.setTrackValue(track,
+            solo ? "I_SOLO" : "D_VOL", solo ? ([solo boolValue] ? 2 : 0) : [volume doubleValue]))
+          error = @"Could not change the preview track control.";
+        else if (MarkProjectDirty) MarkProjectDirty(nullptr);
+        if (solo && Undo_BeginBlock && Undo_EndBlock) Undo_EndBlock([solo boolValue] ? "Solo Splice Bridge track" : "Unsolo Splice Bridge track", 1);
+      }
+    }
+    if (error) { ReaSpliceV10_Reply(identifier.UTF8String, nullptr, error.UTF8String); return; }
+    NSDictionary *result = track ? @{@"projectId":projectID, @"trackId":trackID,
+        @"trackName":@(reasplice::trackString(gBridgeAPI, track, "P_NAME").c_str()),
+        @"volume":@(gBridgeAPI.trackValue(track, "D_VOL")),
+        @"solo":@(gBridgeAPI.trackValue(track, "I_SOLO") != 0)} : @{@"projectId":projectID};
+    ReaSpliceV10_Reply(identifier.UTF8String, jsonString(result).UTF8String, nullptr);
+    return;
+  }
   if ([type isEqualToString:@"bridge.ensure"]) {
+    NSString *error = nil;
+    NSString *projectID = activeProjectID(&error);
+    if (payload[@"projectId"] && (![payload[@"projectId"] isKindOfClass:[NSString class]] ||
+        ![payload[@"projectId"] isEqualToString:projectID]))
+      error = @"The active REAPER project changed before Bridge setup. Try again in the current project.";
+    id show = payload[@"show"];
+    if (show && (![show isKindOfClass:[NSNumber class]] || CFGetTypeID((__bridge CFTypeRef)show) != CFBooleanGetTypeID()))
+      error = @"Bridge show must be a boolean.";
+    if (error) { ReaSpliceV10_Reply(identifier.UTF8String, nullptr, error.UTF8String); return; }
     if (Undo_BeginBlock && Undo_EndBlock) Undo_BeginBlock();
-    auto result = reasplice::ensureMasterBridge(gMasterBridgeAPI);
-    if (Undo_BeginBlock && Undo_EndBlock) Undo_EndBlock("Set up Splice Bridge on master", 2);
-    NSString *json = jsonString(@{@"created":@(result.created), @"moved":@(result.moved), @"migrated":@(result.migrated), @"index":@(result.index)});
-    ReaSpliceV07_Reply(identifier.UTF8String, result.error.empty() ? json.UTF8String : nullptr,
+    auto result = reasplice::ensureBridgeTrack(gBridgeAPI, show && [show boolValue]);
+    if (Undo_BeginBlock && Undo_EndBlock) Undo_EndBlock("Set up Splice Bridge track", -1);
+    NSString *json = jsonString(@{@"trackCreated":@(result.trackCreated), @"created":@(result.created), @"moved":@(result.moved), @"migrated":@(result.migrated),
+        @"recycled":@(result.recycled), @"offlined":@(result.offlined), @"index":@(result.index), @"projectId":projectID});
+    ReaSpliceV10_Reply(identifier.UTF8String, result.error.empty() ? json.UTF8String : nullptr,
         result.error.empty() ? nullptr : result.error.c_str());
     return;
   }
-  if ([type isEqualToString:@"project.tempo"] || [type isEqualToString:@"tempo.preferences"]) {
+  if ([type isEqualToString:@"project.tempo"] || [type isEqualToString:@"tempo.preferences"] || [type isEqualToString:@"bridge.preferences"]) {
     NSString *error = nil;
-    NSDictionary *result = [type isEqualToString:@"project.tempo"] ? projectTempo(&error) : tempoPreferences(payload, &error);
-    ReaSpliceV07_Reply(identifier.UTF8String, result ? jsonString(result).UTF8String : nullptr, error ? error.UTF8String : nullptr);
+    NSDictionary *result;
+    if ([type isEqualToString:@"project.tempo"]) result = projectTempo(&error);
+    else if ([type isEqualToString:@"bridge.preferences"]) result = bridgePreferences(payload, &error);
+    else result = tempoPreferences(payload, &error);
+    ReaSpliceV10_Reply(identifier.UTF8String, result ? jsonString(result).UTF8String : nullptr, error ? error.UTF8String : nullptr);
     return;
   }
   if ([type isEqualToString:@"relay.config"]) {
-    ReaSpliceV07_Reply(identifier.UTF8String, jsonString(relayConfiguration()).UTF8String, nullptr);
+    ReaSpliceV10_Reply(identifier.UTF8String, jsonString(relayConfiguration()).UTF8String, nullptr);
     return;
   }
   if ([type isEqualToString:@"launch"]) {
     NSString *appPath = [[projectRoot() stringByAppendingPathComponent:@"build/ReaSplice.app"] stringByResolvingSymlinksInPath];
     if (![[NSFileManager defaultManager] fileExistsAtPath:appPath]) {
-      ReaSpliceV07_Reply(identifier.UTF8String, nullptr, "The private ReaSplice app has not been built yet.");
+      ReaSpliceV10_Reply(identifier.UTF8String, nullptr, "The private ReaSplice app has not been built yet.");
       return;
     }
     NSBundle *bundle = [NSBundle bundleWithPath:appPath];
     NSString *bundleIdentifier = bundle.bundleIdentifier;
     if (!bundleIdentifier.length) {
-      ReaSpliceV07_Reply(identifier.UTF8String, nullptr, "The private ReaSplice app is incomplete. Rebuild it before launching.");
+      ReaSpliceV10_Reply(identifier.UTF8String, nullptr, "The private ReaSplice app is incomplete. Rebuild it before launching.");
       return;
     }
     bool privateCopyRunning = false;
@@ -297,14 +380,14 @@ static void handleBuiltinMessage(NSDictionary *body) {
       if (running.terminated) continue;
       NSString *runningPath = [running.bundleURL.path stringByResolvingSymlinksInPath];
       if (![runningPath isEqualToString:appPath]) {
-        ReaSpliceV07_Reply(identifier.UTF8String, nullptr,
+        ReaSpliceV10_Reply(identifier.UTF8String, nullptr,
           "Quit the regular Splice app and click Launch Splice again so the dock can start its private copy.");
         return;
       }
       privateCopyRunning = true;
     }
     if (privateCopyRunning) {
-      ReaSpliceV07_Reply(identifier.UTF8String, "{\"launched\":true,\"alreadyRunning\":true}", nullptr);
+      ReaSpliceV10_Reply(identifier.UTF8String, "{\"launched\":true,\"alreadyRunning\":true}", nullptr);
       return;
     }
     NSWorkspaceOpenConfiguration *configuration = [NSWorkspaceOpenConfiguration configuration];
@@ -312,27 +395,27 @@ static void handleBuiltinMessage(NSDictionary *body) {
     configuration.createsNewApplicationInstance = YES;
     [[NSWorkspace sharedWorkspace] openApplicationAtURL:[NSURL fileURLWithPath:appPath]
       configuration:configuration completionHandler:^(NSRunningApplication *app, NSError *error) {
-        ReaSpliceV07_Reply(identifier.UTF8String, "{\"launched\":true}", error ? error.localizedDescription.UTF8String : nullptr);
+        ReaSpliceV10_Reply(identifier.UTF8String, "{\"launched\":true}", error ? error.localizedDescription.UTF8String : nullptr);
       }];
     return;
   }
   NSString *error;
   NSArray<NSURL *> *files = validatedFiles(payload[@"files"], &error);
-  if (!files) { ReaSpliceV07_Reply(identifier.UTF8String, nullptr, error.UTF8String); return; }
+  if (!files) { ReaSpliceV10_Reply(identifier.UTF8String, nullptr, error.UTF8String); return; }
   if ([type isEqualToString:@"insert"]) {
-    if (!InsertMedia) { ReaSpliceV07_Reply(identifier.UTF8String, nullptr, "REAPER's insert API is unavailable."); return; }
+    if (!InsertMedia) { ReaSpliceV10_Reply(identifier.UTF8String, nullptr, "REAPER's insert API is unavailable."); return; }
     if (Undo_BeginBlock) Undo_BeginBlock();
     NSMutableArray *results = [NSMutableArray array];
     int mode = [payload[@"newTrack"] boolValue] ? 1 : 0;
     for (NSURL *file in files) [results addObject:@(InsertMedia(file.path.UTF8String, mode))];
     if (Undo_EndBlock) Undo_EndBlock("Insert Splice sample", -1);
-    ReaSpliceV07_Reply(identifier.UTF8String, jsonString(@{@"results":results}).UTF8String, nullptr);
+    ReaSpliceV10_Reply(identifier.UTF8String, jsonString(@{@"results":results}).UTF8String, nullptr);
     return;
   }
-  if (gDragSession) { ReaSpliceV07_Reply(identifier.UTF8String, nullptr, "A sample drag is already in progress."); return; }
+  if (gDragSession) { ReaSpliceV10_Reply(identifier.UTF8String, nullptr, "A sample drag is already in progress."); return; }
   NSEvent *event = gLastMouseEvent;
   if (!gWeb || !event || event.window != gWeb.window || !([NSEvent pressedMouseButtons] & 1)) {
-    ReaSpliceV07_Reply(identifier.UTF8String, nullptr, "Keep the mouse button held while dragging a downloaded sample into REAPER.");
+    ReaSpliceV10_Reply(identifier.UTF8String, nullptr, "Keep the mouse button held while dragging a downloaded sample into REAPER.");
     return;
   }
   NSPoint point = [gWeb convertPoint:event.locationInWindow fromView:nil];
@@ -346,7 +429,7 @@ static void handleBuiltinMessage(NSDictionary *body) {
   }
   gDragSession = [gWeb beginDraggingSessionWithItems:items event:event source:gController];
   gDragSession.animatesToStartingPositionsOnCancelOrFail = YES;
-  ReaSpliceV07_Reply(identifier.UTF8String, "{\"started\":true}", nullptr);
+  ReaSpliceV10_Reply(identifier.UTF8String, "{\"started\":true}", nullptr);
 }
 
 static NSString *bridgeScript() {
@@ -380,13 +463,13 @@ static NSString *bridgeScript() {
 }
 
 extern "C" __attribute__((visibility("default")))
-void ReaSpliceV07_SetMessageCallback(ReaSpliceMessageCallback callback) { gMessageCallback = callback; }
+void ReaSpliceV10_SetMessageCallback(ReaSpliceMessageCallback callback) { gMessageCallback = callback; }
 
 extern "C" __attribute__((visibility("default")))
-void *ReaSpliceV07_GetReaperAPI(const char *name) { return gGetAPI ? gGetAPI(name) : nullptr; }
+void *ReaSpliceV10_GetReaperAPI(const char *name) { return gGetAPI ? gGetAPI(name) : nullptr; }
 
 extern "C" __attribute__((visibility("default")))
-void ReaSpliceV07_Reply(const char *requestID, const char *resultJSON, const char *error) {
+void ReaSpliceV10_Reply(const char *requestID, const char *resultJSON, const char *error) {
   NSString *identifier = requestID ? [NSString stringWithUTF8String:requestID] : nil;
   if (!identifier) return;
   NSString *errorText = error ? [NSString stringWithUTF8String:error] : nil;
@@ -473,7 +556,7 @@ static void showDock() {
   WKWebViewConfiguration *configuration = [WKWebViewConfiguration new];
   configuration.websiteDataStore = [WKWebsiteDataStore nonPersistentDataStore];
   configuration.mediaTypesRequiringUserActionForPlayback = WKAudiovisualMediaTypeNone;
-  gController = [ReaSpliceControllerV07 new];
+  gController = [ReaSpliceControllerV10 new];
   [configuration.userContentController addScriptMessageHandler:gController name:@"splice"];
   NSString *configScript = [@"Object.defineProperty(window,'spliceRelay',{value:" stringByAppendingFormat:@"%@,writable:false});", jsonString(relayConfiguration())];
   [configuration.userContentController addUserScript:[[WKUserScript alloc]
@@ -560,16 +643,29 @@ static bool initialize(GetAPI api, RegisterAPI registration, HWND mainWindow) {
   import(SetExtState, api, "SetExtState");
   import(EnumProjects, api, "EnumProjects");
   import(Master_GetTempo, api, "Master_GetTempo");
-  import(gMasterBridgeAPI.master, api, "GetMasterTrack");
-  import(gMasterBridgeAPI.count, api, "TrackFX_GetCount");
-  import(gMasterBridgeAPI.monitoringCount, api, "TrackFX_GetRecCount");
-  import(gMasterBridgeAPI.config, api, "TrackFX_GetNamedConfigParm");
-  import(gMasterBridgeAPI.guid, api, "TrackFX_GetFXGUID");
-  import(gMasterBridgeAPI.add, api, "TrackFX_AddByName");
-  import(gMasterBridgeAPI.move, api, "TrackFX_CopyToTrack");
-  import(gMasterBridgeAPI.offline, api, "TrackFX_SetOffline");
-  import(gMasterBridgeAPI.enable, api, "TrackFX_SetEnabled");
-  import(gMasterBridgeAPI.show, api, "TrackFX_Show");
+  import(gBridgeAPI.master, api, "GetMasterTrack");
+  import(gBridgeAPI.projects, api, "EnumProjects");
+  import(gBridgeAPI.count, api, "TrackFX_GetCount");
+  import(gBridgeAPI.monitoringCount, api, "TrackFX_GetRecCount");
+  import(gBridgeAPI.config, api, "TrackFX_GetNamedConfigParm");
+  import(gBridgeAPI.guid, api, "TrackFX_GetFXGUID");
+  import(gBridgeAPI.add, api, "TrackFX_AddByName");
+  import(gBridgeAPI.move, api, "TrackFX_CopyToTrack");
+  import(gBridgeAPI.remove, api, "TrackFX_Delete");
+  import(gBridgeAPI.isOffline, api, "TrackFX_GetOffline");
+  import(gBridgeAPI.isEnabled, api, "TrackFX_GetEnabled");
+  import(gBridgeAPI.offline, api, "TrackFX_SetOffline");
+  import(gBridgeAPI.enable, api, "TrackFX_SetEnabled");
+  import(gBridgeAPI.show, api, "TrackFX_Show");
+  import(gBridgeAPI.trackCount, api, "CountTracks");
+  import(gBridgeAPI.track, api, "GetTrack");
+  import(gBridgeAPI.insertTrack, api, "InsertTrackAtIndex");
+  import(gBridgeAPI.deleteTrack, api, "DeleteTrack");
+  import(gBridgeAPI.trackString, api, "GetSetMediaTrackInfo_String");
+  import(gBridgeAPI.trackValue, api, "GetMediaTrackInfo_Value");
+  import(gBridgeAPI.setTrackValue, api, "SetMediaTrackInfo_Value");
+  import(gBridgeAPI.adjustWindows, api, "TrackList_AdjustWindows");
+  import(MarkProjectDirty, api, "MarkProjectDirty");
   import(InsertMedia, api, "InsertMedia");
   import(Undo_BeginBlock, api, "Undo_BeginBlock");
   import(Undo_EndBlock, api, "Undo_EndBlock");
@@ -597,8 +693,8 @@ static bool initialize(GetAPI api, RegisterAPI registration, HWND mainWindow) {
   registration("accelerator", &gAccelerator);
   gInitialized = true;
   if (SetExtState) {
-    SetExtState("ReaSplice", "native_version", "0.7.0", false);
-    SetExtState("ReaSplice", "native_capabilities", "project.tempo,tempo.preferences,bridge.ensure", false);
+    SetExtState("ReaSplice", "native_version", "0.10.0", false);
+    SetExtState("ReaSplice", "native_capabilities", "project.tempo,tempo.preferences,bridge.ensure,bridge.preferences,bridge.volume,bridge.solo", false);
   }
   return true;
 }
@@ -614,7 +710,7 @@ static void shutdown() {
   gMessageCallback = nullptr;
   gProjectIDs = nil;
   gInitialized = false;
-  if (SetExtState && GetExtState && !std::strcmp(GetExtState("ReaSplice", "native_version"), "0.7.0")) {
+  if (SetExtState && GetExtState && !std::strcmp(GetExtState("ReaSplice", "native_version"), "0.10.0")) {
     SetExtState("ReaSplice", "native_version", "", false);
     SetExtState("ReaSplice", "native_capabilities", "", false);
   }
@@ -631,7 +727,7 @@ int ReaperPluginEntry(void *instance, ReaperPluginInfo *info) {
 // This entry does not touch Lua state, so it requires no Lua headers or symbols.
 // It uses the API pointer exported by the already-loaded js_ReaScriptAPI plugin.
 extern "C" __attribute__((visibility("default")))
-int ReaSpliceV07_Load(void *luaState) {
+int ReaSpliceV10_Load(void *luaState) {
   if (gInitialized) return 0;
   if (![NSThread isMainThread]) { reportError(@"Load the extension on REAPER's main thread."); return 0; }
   GetAPI api = nullptr;
@@ -654,7 +750,7 @@ int ReaSpliceV07_Load(void *luaState) {
     // Lua may release its dlopen reference when the script ends. Keep callbacks
     // and Objective-C classes resident for the remaining REAPER process lifetime.
     Dl_info moduleInfo{};
-    if (dladdr(reinterpret_cast<void *>(&ReaSpliceV07_Load), &moduleInfo) && moduleInfo.dli_fname)
+    if (dladdr(reinterpret_cast<void *>(&ReaSpliceV10_Load), &moduleInfo) && moduleInfo.dli_fname)
       gPinnedModule = dlopen(moduleInfo.dli_fname, RTLD_NOW | RTLD_LOCAL);
     if (!gPinnedModule) { shutdown(); reportError(@"Could not keep the extension loaded safely."); }
   }
@@ -662,14 +758,14 @@ int ReaSpliceV07_Load(void *luaState) {
 }
 
 extern "C" __attribute__((visibility("default")))
-int ReaSpliceV07_Unload(void *luaState) {
+int ReaSpliceV10_Unload(void *luaState) {
   shutdown();
   // Deliberately retain the module: Objective-C runtime classes cannot be unloaded.
   return 0;
 }
 
 extern "C" __attribute__((visibility("default")))
-int ReaSpliceV07_Reload(void *luaState) {
+int ReaSpliceV10_Reload(void *luaState) {
   if (gInitialized && [NSThread isMainThread]) {
     closeDock();
     showDock();

@@ -7,3 +7,12 @@
   width: 0 !important;
   height: 0 !important;
 }
+/* Splice owns icon--active through its actual Bridge connection stream. */
+.bridge-button sp-svg-icon.icon:not(.icon--active) {
+  fill: #fff !important;
+  color: #fff !important;
+}
+/* The always-visible host control replaces the bottom playback volume. */
+.reasplice-volume-ready .volume-control-wrap sp-volume-control {
+  display: none !important;
+}

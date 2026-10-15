@@ -6,6 +6,9 @@
     <meta name="color-scheme" content="dark">
     <title>ReaSplice</title>
     <link rel="stylesheet" href="style.css">
+    <script src="bridge-controller.js" defer></script>
+    <script src="bridge-volume.js" defer></script>
+    <script src="preview-volume.js" defer></script>
     <script src="app.js" defer></script>
   </head>
   <body>
@@ -15,7 +18,21 @@
         <div class="view-switch" role="group" aria-label="Splice app view"><button id="companion" class="active" aria-pressed="true" title="Companion view">Compact</button><button id="main" aria-pressed="false" title="Full Splice app">Full app</button></div>
         <button id="reconnect" class="icon-button" title="Reconnect to Splice" aria-label="Reconnect to Splice"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M5.8 8a7 7 0 0 1 11.55-2.5L20 8M4 16l2.65 2.5A7 7 0 0 0 18.2 16"/></svg></button>
         <button id="shutdown" class="icon-button" title="Stop ReaSplice" aria-label="Stop ReaSplice" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v9M7 6a8 8 0 1 0 10 0"/></svg></button>
+        <button id="options-button" class="icon-button" title="ReaSplice options" aria-label="ReaSplice options" aria-expanded="false" aria-controls="options-panel"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></button>
       </header>
+      <section id="preview-control" class="preview-control" aria-label="Preview volume">
+        <label for="preview-volume"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 5 6 9H3v6h3l5 4zM15 8a6 6 0 0 1 0 8M18 5a10 10 0 0 1 0 14"/></svg><span id="preview-source">Splice</span></label>
+        <input id="preview-volume" type="range" min="0" max="100" step="1" value="70" aria-label="Splice preview volume" disabled>
+        <output id="preview-volume-value" for="preview-volume">—</output>
+        <button id="bridge-solo" class="bridge-solo" aria-label="Solo Splice Bridge track" aria-pressed="false" title="Connect Bridge to solo its track" disabled>Solo</button>
+      </section>
+      <section id="options-panel" class="options-panel" aria-label="ReaSplice options" hidden>
+        <div class="bridge-heading"><strong>Splice Bridge</strong><output id="bridge-state" class="bridge-state" aria-live="polite">Disconnected</output></div>
+        <label for="bridge-switch-mode">When switching projects</label>
+        <select id="bridge-switch-mode" aria-describedby="bridge-switch-note" disabled><option value="disconnect">Disconnect</option><option value="follow">Follow active project</option></select>
+        <p id="bridge-switch-note">Disconnect and preview through Splice. Connect Bridge again when you need it.</p>
+        <button id="bridge-disconnect" class="bridge-disconnect" disabled>Disconnect Bridge</button>
+      </section>
       <section id="tempo-controls" class="tempo-controls" aria-label="Search BPM preference">
         <div class="tempo-options">
           <div id="tempo-mode" class="tempo-modes" role="group" aria-label="Search BPM preference">
